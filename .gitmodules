@@ -1,0 +1,3 @@
+[submodule "vendor/spire-mentor"]
+	path = vendor/spire-mentor
+	url = https://github.com/tfriedel/spire-mentor.git
