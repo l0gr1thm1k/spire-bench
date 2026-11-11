@@ -164,3 +164,52 @@ def test_starts_sent_back_to_back_cannot_open_more_games_than_the_limit(gateway)
         assert first == {"type": "errors", "errors": [{"code": "not_available"}]}
         assert {_recv(ws)["type"], _recv(ws)["type"]} == {"decisions"}
     assert store.db.execute("select count(*) from episodes").fetchone() == (2,)
+
+
+def test_a_token_cannot_play_under_an_agent_version_another_owner_has(gateway):
+    url, store = gateway(ScriptedGame, tokens={"alice-token": "alice", "bob-token": "bob"})
+    with connect(url) as ws:
+        ws.send(json.dumps({**HELLO, "token": "alice-token"}))
+        _recv(ws)
+        ws.send(json.dumps({**START, "agent_version": "alice-bot"}))
+        assert _recv(ws)["type"] == "decisions"
+    with connect(url) as ws:
+        ws.send(json.dumps({**HELLO, "token": "bob-token"}))
+        _recv(ws)
+        ws.send(json.dumps({**START, "agent_version": "alice-bot"}))  # bob would extend alice's streak
+        assert _recv(ws) == {"type": "errors", "errors": [{"code": "rejected"}]}
+        ws.send(json.dumps({**START, "agent_version": "bob-bot"}))
+        assert _recv(ws)["type"] == "decisions"
+    owners = dict(store.db.execute("select agent_version, owner from agent_versions").fetchall())
+    assert owners == {"alice-bot": "alice", "bob-bot": "bob"}
+
+
+def test_more_connections_do_not_buy_an_owner_more_games(gateway):
+    url, store = gateway(ScriptedGame, max_in_flight=2)
+    with connect(url) as first, connect(url) as second:
+        for ws in (first, second):
+            ws.send(json.dumps(HELLO))
+            _recv(ws)
+        first.send(json.dumps({**START, "count": 2}))
+        assert {_recv(first)["type"], _recv(first)["type"]} == {"decisions"}
+        second.send(json.dumps(START))  # same owner, new connection
+        assert _recv(second) == {"type": "errors", "errors": [{"code": "not_available"}]}
+    # Both connections closed: their games ended, so the slots are free again.
+    for _ in range(100):
+        if store.db.execute("select count(*) from episodes where outcome is null").fetchone() == (0,):
+            break
+        time.sleep(0.05)
+    with _session(url) as ws:
+        assert _recv(ws)["type"] == "decisions"
+
+
+def test_the_gateway_caps_games_across_all_owners(gateway):
+    url, _ = gateway(ScriptedGame, tokens={"a": "alice", "b": "bob"}, max_games=1)
+    with connect(url) as alice, connect(url) as bob:
+        for ws, token in ((alice, "a"), (bob, "b")):
+            ws.send(json.dumps({**HELLO, "token": token}))
+            _recv(ws)
+        alice.send(json.dumps({**START, "agent_version": "alice-bot"}))
+        assert _recv(alice)["type"] == "decisions"
+        bob.send(json.dumps({**START, "agent_version": "bob-bot"}))
+        assert _recv(bob) == {"type": "errors", "errors": [{"code": "not_available"}]}

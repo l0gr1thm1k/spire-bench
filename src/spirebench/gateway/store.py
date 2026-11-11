@@ -21,6 +21,7 @@ from spirebench.gateway.episode import Episode
 _SCHEMA = """
 create table if not exists agent_versions (
     agent_version text primary key,
+    owner         text not null,
     metadata      text not null,
     first_seen    real not null
 );
@@ -52,10 +53,13 @@ class Store:
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.executescript(_SCHEMA)
 
-    def register_agent(self, agent_version: str, metadata: dict[str, Any]) -> None:
-        self.db.execute("insert or ignore into agent_versions values (?, ?, ?)",
-                        (agent_version, json.dumps(metadata, sort_keys=True), time.time()))
+    def claim_agent(self, agent_version: str, owner: str, metadata: dict[str, Any]) -> bool:
+        """Register an agent version to its first owner. False if someone else owns it."""
+        self.db.execute("insert or ignore into agent_versions values (?, ?, ?, ?)",
+                        (agent_version, owner, json.dumps(metadata, sort_keys=True), time.time()))
         self.db.commit()
+        row = self.db.execute("select owner from agent_versions where agent_version = ?", (agent_version,)).fetchone()
+        return bool(row and row[0] == owner)
 
     def next_number(self, agent_version: str) -> int:
         row = self.db.execute("select coalesce(max(number), 0) from episodes where agent_version = ?",

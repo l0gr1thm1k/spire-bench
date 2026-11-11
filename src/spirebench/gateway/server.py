@@ -16,6 +16,7 @@ import logging
 import secrets
 import string
 import uuid
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -39,9 +40,10 @@ def new_seed() -> str:
 @dataclass
 class Settings:
     build_id: str = "v0.111.0"
-    tokens: frozenset[str] = frozenset({"dev"})
+    tokens: dict[str, str] = field(default_factory=lambda: {"dev": "dev"})  # token -> owner
     decision_deadline_ms: int = 5000
-    max_in_flight: int = 64
+    max_in_flight: int = 64  # open games per owner, across all of the owner's connections
+    max_games: int = 128  # open games on this gateway, across all owners
 
 
 @dataclass
@@ -49,7 +51,7 @@ class _Connection:
     ws: ServerConnection
     episodes: dict[str, Episode] = field(default_factory=dict)  # open games only
     locks: dict[str, asyncio.Lock] = field(default_factory=dict)
-    starting: int = 0  # games admitted but not yet registered
+    owner: str = ""  # who the token belongs to; owns the agent versions it plays
 
     async def send(self, msg: Message) -> None:
         await self.ws.send(encode(msg))
@@ -70,6 +72,10 @@ class Gateway:
         self.settings = settings or Settings()
         self.seed_fn = seed_fn
         self._numbers: dict[str, int] = {}
+        # Game slots, reserved when a start is admitted and released when its
+        # game ends or fails to boot. Counted per owner, not per connection,
+        # so opening more connections doesn't buy more harness processes.
+        self._slots: Counter[str] = Counter()
 
     async def serve(self, host: str = "127.0.0.1", port: int = 8765) -> Server:
         return await serve(self.handle, host, port, max_size=2**22)
@@ -103,6 +109,7 @@ class Gateway:
             await conn.error("rejected")
             await conn.ws.close()
             return False
+        conn.owner = self.settings.tokens[str(hello["token"])]
         cfg = self.settings
         await conn.send({"type": "welcome", "protocol_version": PROTOCOL_VERSION, "build_id": cfg.build_id,
                          "schema_version": SCHEMA_VERSION,
@@ -137,11 +144,14 @@ class Gateway:
                 and count >= 1 and isinstance(agent, str) and agent and msg.get("key") == "practice"):
             await conn.error("bad_request")
             return
-        if len(conn.episodes) + conn.starting + count > self.settings.max_in_flight:
+        if not self.store.claim_agent(agent, conn.owner, msg.get("metadata") or {}):
+            await conn.error("rejected")  # another owner's agent version: its streak isn't ours to extend
+            return
+        if (self._slots[conn.owner] + count > self.settings.max_in_flight
+                or sum(self._slots.values()) + count > self.settings.max_games):
             await conn.error("not_available")
             return
-        conn.starting += count  # reserved now, before any await, so pipelined starts can't overshoot
-        self.store.register_agent(agent, msg.get("metadata") or {})
+        self._slots[conn.owner] += count  # reserved before any await, so pipelined starts can't overshoot
         await asyncio.gather(*(self._run_new(conn, agent, str(character), ascension) for _ in range(count)),
                              return_exceptions=True)
 
@@ -155,12 +165,13 @@ class Gateway:
         episode_id = f"e-{uuid.uuid4().hex[:12]}"
         try:
             game = await asyncio.to_thread(self.game_factory)
-        except (OSError, RuntimeError):
+        except BaseException as exc:
+            self._slots[conn.owner] -= 1
+            if not isinstance(exc, (OSError, RuntimeError)):
+                raise
             log.exception("could not start a game process")
             await conn.error("internal")
             return
-        finally:
-            conn.starting -= 1
         ep = Episode(episode_id, self._number(agent), character, ascension, self.seed_fn(), game)
         conn.episodes[episode_id], conn.locks[episode_id] = ep, asyncio.Lock()
         self.store.begin(ep, agent, self.settings.build_id)
@@ -200,6 +211,7 @@ class Gateway:
         """Close the game and record the result, exactly once."""
         if conn.episodes.pop(ep.episode_id, None) is None:
             return
+        self._slots[conn.owner] -= 1
         conn.locks.pop(ep.episode_id, None)
         await asyncio.to_thread(ep.close)
         self.store.finish(ep, self.settings.build_id)
