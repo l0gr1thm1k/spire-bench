@@ -1,0 +1,220 @@
+"""The gateway: a WebSocket server that runs games for connected bots.
+
+One connection is one client. It says hello, starts episodes, and answers
+decisions with actions. Each episode owns one harness process; every call
+into it runs in a thread so the event loop stays free.
+
+M1 scope: one practice key with the harness's own seeded dice, a token check
+against a fixed set, and the deadline sent but not enforced. Deadlines,
+reconnect and the observation allow-list are M2.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import secrets
+import string
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from websockets.asyncio.server import Server, ServerConnection, serve
+from websockets.exceptions import ConnectionClosed
+
+from spirebench.gateway.episode import Episode, Game
+from spirebench.gateway.store import Store
+from spirebench.protocol import CHARACTERS, PROTOCOL_VERSION, SCHEMA_VERSION, Message, decode, encode
+
+log = logging.getLogger(__name__)
+
+SEED_ALPHABET = string.ascii_uppercase + string.digits
+
+
+def new_seed() -> str:
+    return "".join(secrets.choice(SEED_ALPHABET) for _ in range(12))
+
+
+@dataclass
+class Settings:
+    build_id: str = "v0.111.0"
+    tokens: frozenset[str] = frozenset({"dev"})
+    decision_deadline_ms: int = 5000
+    max_in_flight: int = 64
+
+
+@dataclass
+class _Connection:
+    ws: ServerConnection
+    episodes: dict[str, Episode] = field(default_factory=dict)  # open games only
+    locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    starting: int = 0  # games admitted but not yet registered
+
+    async def send(self, msg: Message) -> None:
+        await self.ws.send(encode(msg))
+
+    async def error(self, code: str, episode: str | None = None, seq: int | None = None) -> None:
+        item: dict[str, Any] = {"code": code}
+        if episode is not None:
+            item["episode"] = episode
+        if seq is not None:
+            item["seq"] = seq
+        await self.send({"type": "errors", "errors": [item]})
+
+
+class Gateway:
+    def __init__(self, store: Store, game_factory: Callable[[], Game], settings: Settings | None = None,
+                 seed_fn: Callable[[], str] = new_seed) -> None:
+        self.store, self.game_factory = store, game_factory
+        self.settings = settings or Settings()
+        self.seed_fn = seed_fn
+        self._numbers: dict[str, int] = {}
+
+    async def serve(self, host: str = "127.0.0.1", port: int = 8765) -> Server:
+        return await serve(self.handle, host, port, max_size=2**22)
+
+    async def handle(self, ws: ServerConnection) -> None:
+        conn = _Connection(ws)
+        tasks: set[asyncio.Task[None]] = set()
+        try:
+            if not await self._greet(conn):
+                return
+            async for text in ws:
+                task = asyncio.create_task(self._dispatch(conn, text))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+        except ConnectionClosed:
+            pass
+        finally:
+            # Let every game call in flight settle first, so nothing touches a
+            # harness pipe while it is being closed and no game starts unseen.
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await self._abandon(conn)
+
+    async def _greet(self, conn: _Connection) -> bool:
+        try:
+            hello = decode(await conn.ws.recv())
+        except ValueError:
+            hello = {}
+        ok = (hello.get("type") == "hello" and PROTOCOL_VERSION in (hello.get("protocol_versions") or [])
+              and hello.get("token") in self.settings.tokens)
+        if not ok:
+            await conn.error("rejected")
+            await conn.ws.close()
+            return False
+        cfg = self.settings
+        await conn.send({"type": "welcome", "protocol_version": PROTOCOL_VERSION, "build_id": cfg.build_id,
+                         "schema_version": SCHEMA_VERSION,
+                         "limits": {"decision_deadline_ms": cfg.decision_deadline_ms,
+                                    "max_in_flight": cfg.max_in_flight}})
+        return True
+
+    async def _dispatch(self, conn: _Connection, text: str | bytes) -> None:
+        try:
+            msg = decode(text)
+        except ValueError:
+            await conn.error("bad_request")
+            return
+        try:
+            if msg["type"] == "start":
+                await self._start(conn, msg)
+            elif msg["type"] == "actions":
+                await asyncio.gather(*(self._act(conn, a) for a in msg.get("actions") or []),
+                                     return_exceptions=True)
+            else:
+                await conn.error("bad_request")
+        except ConnectionClosed:
+            pass
+        except Exception:  # one bad message must not take the connection down
+            log.exception("gateway failed on a %s message", msg.get("type"))
+            await conn.error("internal")
+
+    async def _start(self, conn: _Connection, msg: Message) -> None:
+        character = CHARACTERS.get(str(msg.get("character")))
+        ascension, count, agent = msg.get("ascension"), msg.get("count"), msg.get("agent_version")
+        if not (character and isinstance(ascension, int) and 0 <= ascension <= 10 and isinstance(count, int)
+                and count >= 1 and isinstance(agent, str) and agent and msg.get("key") == "practice"):
+            await conn.error("bad_request")
+            return
+        if len(conn.episodes) + conn.starting + count > self.settings.max_in_flight:
+            await conn.error("not_available")
+            return
+        conn.starting += count  # reserved now, before any await, so pipelined starts can't overshoot
+        self.store.register_agent(agent, msg.get("metadata") or {})
+        await asyncio.gather(*(self._run_new(conn, agent, str(character), ascension) for _ in range(count)),
+                             return_exceptions=True)
+
+    def _number(self, agent: str) -> int:
+        if agent not in self._numbers:
+            self._numbers[agent] = self.store.next_number(agent) - 1
+        self._numbers[agent] += 1
+        return self._numbers[agent]
+
+    async def _run_new(self, conn: _Connection, agent: str, character: str, ascension: int) -> None:
+        episode_id = f"e-{uuid.uuid4().hex[:12]}"
+        try:
+            game = await asyncio.to_thread(self.game_factory)
+        except (OSError, RuntimeError):
+            log.exception("could not start a game process")
+            await conn.error("internal")
+            return
+        finally:
+            conn.starting -= 1
+        ep = Episode(episode_id, self._number(agent), character, ascension, self.seed_fn(), game)
+        conn.episodes[episode_id], conn.locks[episode_id] = ep, asyncio.Lock()
+        self.store.begin(ep, agent, self.settings.build_id)
+        async with conn.locks[episode_id]:
+            await asyncio.to_thread(ep.start)
+            await self._next(conn, ep)
+
+    async def _act(self, conn: _Connection, action: Any) -> None:
+        if not isinstance(action, dict):
+            await conn.error("bad_request")
+            return
+        episode_id, seq, action_id = action.get("episode"), action.get("seq"), action.get("action_id")
+        ep = conn.episodes.get(str(episode_id))
+        if ep is None:
+            await conn.error("not_available", str(episode_id) if episode_id else None)
+            return
+        if not isinstance(seq, int) or not isinstance(action_id, int):
+            await conn.error("bad_request", ep.episode_id)
+            return
+        async with conn.locks[ep.episode_id]:
+            if ep.episode_id not in conn.episodes:  # finished while this action waited for the lock
+                await conn.error("not_available", ep.episode_id)
+                return
+            code = await asyncio.to_thread(ep.apply, seq, action_id)
+            if code is not None:
+                await conn.error(code, ep.episode_id, seq)
+            if ep.over or code in (None, "rejected"):
+                await self._next(conn, ep)  # a game that failed is ended (void), not left open
+
+    async def _next(self, conn: _Connection, ep: Episode) -> None:
+        if not ep.over:
+            await conn.send({"type": "decisions", "decisions": [ep.decision(self.settings.decision_deadline_ms)]})
+            return
+        await self._end(conn, ep)
+
+    async def _finalize(self, conn: _Connection, ep: Episode) -> None:
+        """Close the game and record the result, exactly once."""
+        if conn.episodes.pop(ep.episode_id, None) is None:
+            return
+        conn.locks.pop(ep.episode_id, None)
+        await asyncio.to_thread(ep.close)
+        self.store.finish(ep, self.settings.build_id)
+
+    async def _end(self, conn: _Connection, ep: Episode) -> None:
+        await self._finalize(conn, ep)
+        await conn.send({"type": "episode_end", "episode": ep.episode_id, "number": ep.number,
+                         "outcome": ep.outcome, "floor": ep.floor, "act": ep.act,
+                         "reveal": {"episode_key": ep.seed, "transcript": ep.transcript}})
+
+    async def _abandon(self, conn: _Connection) -> None:
+        """A client that leaves loses its open games, so quitting can't protect a streak."""
+        for ep in list(conn.episodes.values()):
+            lock = conn.locks.get(ep.episode_id) or asyncio.Lock()
+            async with lock:
+                if not ep.over:
+                    ep.outcome = "loss"
+                await self._finalize(conn, ep)

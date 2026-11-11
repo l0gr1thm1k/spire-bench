@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/l0gr1thm1k/spire-bench/schema/protocol-v0.json",
+  "title": "spire-bench protocol v0",
+  "description": "Every message between the library and the gateway. One JSON object per WebSocket text frame, told apart by its \"type\". The observation inside a decision is not frozen until M4, so it is described only as an object here.",
+  "oneOf": [
+    {"$ref": "#/$defs/hello"},
+    {"$ref": "#/$defs/welcome"},
+    {"$ref": "#/$defs/start"},
+    {"$ref": "#/$defs/decisions"},
+    {"$ref": "#/$defs/actions"},
+    {"$ref": "#/$defs/errors"},
+    {"$ref": "#/$defs/episode_end"}
+  ],
+  "$defs": {
+    "episode": {"type": "string", "minLength": 1, "description": "The gateway's id for one game."},
+    "seq": {"type": "integer", "minimum": 0, "description": "Position of a decision within its episode. An action answers the decision with the same seq."},
+    "hello": {
+      "description": "client → server, first message on a connection.",
+      "type": "object",
+      "required": ["type", "token", "client_version", "protocol_versions"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "hello"},
+        "token": {"type": "string"},
+        "client_version": {"type": "string"},
+        "protocol_versions": {"type": "array", "items": {"type": "integer"}, "minItems": 1}
+      }
+    },
+    "welcome": {
+      "description": "server → client, the answer to hello.",
+      "type": "object",
+      "required": ["type", "protocol_version", "build_id", "schema_version", "limits"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "welcome"},
+        "protocol_version": {"type": "integer"},
+        "build_id": {"type": "string", "description": "The game build every episode on this gateway runs."},
+        "schema_version": {"type": "integer", "description": "Version of the observation format."},
+        "limits": {
+          "type": "object",
+          "required": ["decision_deadline_ms", "max_in_flight"],
+          "additionalProperties": false,
+          "properties": {
+            "decision_deadline_ms": {"type": "integer", "minimum": 1},
+            "max_in_flight": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
+    "start": {
+      "description": "client → server, start count new episodes.",
+      "type": "object",
+      "required": ["type", "agent_version", "character", "ascension", "key", "count"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "start"},
+        "agent_version": {"type": "string", "minLength": 1},
+        "character": {"enum": ["ironclad", "silent", "defect", "regent", "necrobinder"]},
+        "ascension": {"type": "integer", "minimum": 0, "maximum": 10},
+        "key": {"enum": ["practice"], "description": "Only practice exists until keyed dice land in M3."},
+        "count": {"type": "integer", "minimum": 1},
+        "metadata": {"type": "object", "description": "Free-form run metadata (checkpoint, sims, hardware), stored with the agent version."}
+      }
+    },
+    "legal_action": {
+      "type": "object",
+      "required": ["action_id", "type"],
+      "properties": {
+        "action_id": {"type": "integer", "minimum": 0, "description": "In v0 this equals the action's position in legal_actions."},
+        "type": {"type": "string", "description": "The move's verb, for example play_card, end_turn, choose_option, buy_card."}
+      },
+      "additionalProperties": {"type": ["integer", "string"]}
+    },
+    "decision": {
+      "type": "object",
+      "required": ["episode", "seq", "decision_type", "observation", "legal_actions", "deadline_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "episode": {"$ref": "#/$defs/episode"},
+        "seq": {"$ref": "#/$defs/seq"},
+        "decision_type": {"type": "string"},
+        "observation": {"type": "object"},
+        "legal_actions": {"type": "array", "items": {"$ref": "#/$defs/legal_action"}, "minItems": 1},
+        "deadline_ms": {"type": "integer", "minimum": 1}
+      }
+    },
+    "decisions": {
+      "description": "server → client, decisions waiting for an action.",
+      "type": "object",
+      "required": ["type", "decisions"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "decisions"},
+        "decisions": {"type": "array", "items": {"$ref": "#/$defs/decision"}, "minItems": 1}
+      }
+    },
+    "actions": {
+      "description": "client → server, one action per decision answered.",
+      "type": "object",
+      "required": ["type", "actions"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "actions"},
+        "actions": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["episode", "seq", "action_id"],
+            "additionalProperties": false,
+            "properties": {
+              "episode": {"$ref": "#/$defs/episode"},
+              "seq": {"$ref": "#/$defs/seq"},
+              "action_id": {"type": "integer", "minimum": 0}
+            }
+          }
+        }
+      }
+    },
+    "errors": {
+      "description": "server → client. A fixed code only, never game state.",
+      "type": "object",
+      "required": ["type", "errors"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "errors"},
+        "errors": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["code"],
+            "additionalProperties": false,
+            "properties": {
+              "episode": {"$ref": "#/$defs/episode"},
+              "seq": {"$ref": "#/$defs/seq"},
+              "code": {"enum": ["illegal_action", "bad_request", "not_available", "rejected", "internal"]}
+            }
+          }
+        }
+      }
+    },
+    "episode_end": {
+      "description": "server → client, a game is over.",
+      "type": "object",
+      "required": ["type", "episode", "number", "outcome", "floor", "act"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "episode_end"},
+        "episode": {"$ref": "#/$defs/episode"},
+        "number": {"type": "integer", "minimum": 1, "description": "Order this episode started in, for this agent version. Win streaks count in this order."},
+        "outcome": {"enum": ["win", "loss", "void"], "description": "void: the referee failed, not the bot."},
+        "floor": {"type": "integer", "minimum": 0},
+        "act": {"type": "integer", "minimum": 0},
+        "reveal": {
+          "type": "object",
+          "required": ["episode_key", "transcript"],
+          "additionalProperties": false,
+          "properties": {
+            "episode_key": {"type": "string"},
+            "transcript": {"type": "array", "items": {"type": "object"}}
+          }
+        }
+      }
+    }
+  }
+}

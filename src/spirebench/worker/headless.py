@@ -314,7 +314,7 @@ _SCREENS = {
 }
 
 
-def legal_choices(game: HeadlessGame, view: dict[str, Any]) -> list[Choice]:
+def legal_choices(game: Any, view: dict[str, Any]) -> list[Choice]:
     """Every move the player may make on this screen, as (verb, args) pairs.
 
     In combat the harness lists the moves itself. Elsewhere they are read off
