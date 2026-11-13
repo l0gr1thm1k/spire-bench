@@ -5,10 +5,18 @@ description = "A shared, verifiable benchmark for Slay the Spire 2 bots: client 
 authors = [{ name = "Daniel Smith" }]
 license = "MIT"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "websockets>=17.4",
+    "zstandard>=0.25.0",
+]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "flake8>=7.5.0",
+    "jsonschema>=4.26.0",
+    "mypy>=2.4.1",
+    "pytest>=8",
+]
 
 [build-system]
 requires = ["uv_build>=0.9.18,<0.10.0"]
