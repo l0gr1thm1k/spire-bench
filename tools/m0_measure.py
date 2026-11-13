@@ -105,18 +105,27 @@ def play_one(job: tuple[str, int, str]) -> dict[str, Any]:
     character, ascension, seed = job
     row: dict[str, Any] = {"character": character, "ascension": ascension, "seed": seed, "terminal": "boot_failed"}
     wall0 = time.perf_counter()
+    game: HeadlessGame | None = None
     try:
         with HeadlessGame(game_version=_game_version, timeout_s=STEP_TIMEOUT_S) as game:
             row["boot_s"], row["boot_cpu_s"] = time.perf_counter() - wall0, game.cpu_times().total
             view = game.start_run(character, ascension, seed)
             row["start_s"] = time.perf_counter() - wall0 - row["boot_s"]
             row["start_cpu_s"] = game.cpu_times().total - row["boot_cpu_s"]
+            row["act1"] = (view.get("context") or {}).get("act_name")
             cpu0, play0 = game.cpu_times().total, time.perf_counter()
             _play(game, view, random.Random(f"m0:{seed}"), row)
             row["cpu_s"], row["wall_s"] = game.cpu_times().total - cpu0, time.perf_counter() - play0
+            row["peak_rss_mb"] = game.peak_rss_mb()
     except (HarnessError, OSError, ValueError) as exc:
         row["terminal"] = "harness_timeout" if "timed out" in str(exc) else "harness_crash"
         row["error"] = f"{type(exc).__name__}: {exc}"[:300]
+    finally:
+        if game is not None:  # read after close: the stderr drain has seen every line
+            row["world_errors"] = game.world_errors.count
+            row["world_errors_complete"] = game.world_errors.complete
+            if game.world_errors.sample:
+                row["world_error_sample"] = game.world_errors.sample[:3]
     return {k: round(v, 3) if isinstance(v, float) else v for k, v in row.items()}
 
 
@@ -130,6 +139,12 @@ def summarize(rows: list[dict[str, Any]], elapsed: float, procs: int) -> str:
     ok = [r for r in rows if r["terminal"] == "game_over"]
     lines.append(f"runs {len(rows)}, finished {len(ok)}, procs {procs}, elapsed {elapsed:.1f}s")
     lines.append("ends: " + ", ".join(f"{k} {v}" for k, v in Counter(r["terminal"] for r in rows).items()))
+    lines.append("act 1: " + ", ".join(f"{k} {v}" for k, v in Counter(r.get("act1") for r in rows).items()))
+    counted = [r for r in rows if r.get("world_errors_complete")]
+    errs = [r["world_errors"] for r in counted]
+    lines.append(f"game errors on stderr: {sum(errs)} in {sum(e > 0 for e in errs)} of {len(counted)} runs counted "
+                 f"({len(rows) - len(counted)} runs not counted: the process never started, or stderr wasn't "
+                 "read to its end)")
     hdr = f"{'character':<12}{'runs':>5}{'wins':>5}{'floor':>7}{'act3':>6}{'acts/run':>10}{'p90':>7}" \
           f"{'acts/floor':>11}{'cpu ms/act':>11}{'wall ms/act':>12}"
     lines.append(hdr)
@@ -157,6 +172,8 @@ def summarize(rows: list[dict[str, Any]], elapsed: float, procs: int) -> str:
     if ok:
         boot = [r["boot_cpu_s"] + r["start_cpu_s"] for r in ok]
         boot_wall = [r["boot_s"] + r["start_s"] for r in ok]
+        rss = [r["peak_rss_mb"] for r in ok if "peak_rss_mb" in r]
+        lines.append(f"peak memory per process: median {statistics.median(rss):.0f} MiB, max {max(rss):.0f} MiB")
         lines.append(f"startup (process boot + start_run): median {statistics.median(boot_wall) * 1000:.0f} ms wall, "
                      f"{statistics.median(boot) * 1000:.0f} ms CPU")
     return "\n".join(lines)

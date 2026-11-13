@@ -44,3 +44,17 @@ def test_a_harness_that_does_not_answer_in_time_is_killed():
 
     with pytest.raises(HarnessError, match="timed out"):
         HeadlessGame(timeout_s=0.05)
+
+
+def _act_one(seed: str) -> str:
+    with HeadlessGame() as game:
+        view = game.start_run("Ironclad", 10, seed)
+    assert view.get("type") != "error", view
+    return str((view.get("context") or {}).get("act_name"))
+
+
+def test_the_seed_picks_act_one():
+    # Shown to fail: without "act1": "roll" the harness starts every run in Overgrowth.
+    acts = [_act_one(f"ACTROLL{i}") for i in range(12)]
+    assert set(acts) == {"Overgrowth", "Underdocks"}, acts
+    assert _act_one("ACTROLL0") == acts[0]  # the same seed picks the same act

@@ -15,6 +15,7 @@ which he has offered for the benchmark. It is a companion to the proposal,
 | M3 | Keyed dice, the unkeyed-draw guard, exact replay | |
 | M4 | Real bots through adapters (floor-climber, spire-mentor, cygn, maxoley) and the conformance kit | |
 | M5 | Scoring, win streaks, owner reveal, practice key, static results page | |
+| Fidelity | Recorded human runs replayed through the harness stay in sync to the end | ongoing, see [Fidelity](#fidelity-does-the-harness-play-the-real-game) |
 
 Rules that hold throughout:
 
@@ -34,23 +35,31 @@ proposal's rule that each operator runs their own copy of the game.
 
 It supports builds v0.107.1 and v0.111.0, one binary per build, set at
 compile time. spire-mentor's own benchmark (random fights, one warm process)
-measured about 1.3 ms of CPU per action. M0 measured full A10 runs with a
-fresh process per run: about 5.3 ms of CPU per action, 1.25 s of startup, and
-about 9 vCPU-hours per 5,000-run entry. See [M0.md](M0.md).
+measured about 1.3 ms of CPU per action. M0 measured A10 runs in act 1 with a
+fresh process per run: about 5.3 ms of CPU per action, 1.25 s of startup,
+124 MiB per process, and roughly 9 vCPU-hours per 5,000-run entry, an estimate
+until acts 2 and 3 are measured. See [M0.md](M0.md).
 
 ### What it already gives us, and what the benchmark adds
 
 | Piece | Status | Notes |
 |---|---|---|
 | Real game logic, headless | have | The game's own code, with Godot replaced by stubs. |
-| Decision types | have | `map_select`, `combat_play`, `card_reward`, `card_select`, `bundle_select`, `event_choice`, `rest_site`, `shop`, `potion_swap`, `game_over`. This is cygn's list, which suggests cygn's referee is built on the same harness. |
+| Decision types | have | `map_select`, `combat_play`, `card_reward`, `card_select`, `bundle_select`, `event_choice`, `rest_site`, `shop`, `potion_swap`, `game_over`, and `unknown` for a screen the harness doesn't recognize. cygn's referee is built on this same harness. |
 | Legal actions | have | A `legal_actions` command lists combat moves. Other screens list their options in the state, and `spirebench.worker.headless.legal_choices` turns them into moves. |
 | Fight starts (Track 2) | have | `set_player` and `enter_room` build a fight from a given deck, relics and encounter. Only the referee may call them. |
-| Keyed dice | add | The harness uses the game's own seeded generator. The benchmark needs cygn's HMAC-keyed streams, plus a guard that voids any episode where a draw reaches the original generator. |
-| Observation filter | add | The state includes the draw pile in order and an `rng` block with the run seed and stream counters, both needed for parity testing. The gateway applies an allow-list, so only listed fields reach a bot. |
-| Locked command set | add | Debug commands (`set_draw_order`, `rng_probe`, `dump_*`, `get_trace`, `load_save`, ...) must be unreachable by a bot. Bots never talk to the worker directly. |
-| Crystal Sphere | add | The harness completes the minigame automatically. cygn turned it into a bot decision. |
-| A run per process | limit | A second `start_run` in one process fails, so each run needs a fresh process (M0 finding 1). |
+| Keyed dice | coming | The public harness uses the game's own seeded generator. Thomas has HMAC-keyed streams with the unkeyed-draw guard on a private branch; it works on v0.107.1, and the v0.111.0 generator is still a stub. |
+| Player-visible view | coming | The raw state includes the draw pile in order and an `rng` block with the run seed and stream counters, both needed for parity testing. Thomas's branch renders a player-visible view inside the host, from an allow-list. |
+| Locked command set | coming | Debug commands (`set_draw_order`, `rng_probe`, `dump_*`, `get_trace`, `load_save`, ...) must be unreachable by a bot. On Thomas's branch; bots never talk to the worker directly in any case. |
+| Crystal Sphere | coming | The public harness completes the minigame automatically. A decision on Thomas's branch, as in cygn's referee. |
+| Legal actions on every screen, fixed error codes | coming | On Thomas's branch. Until then `legal_choices` reads them off each screen. |
+| Rewards | gap | The host takes gold, relic and potion rewards automatically. |
+| Potions outside combat | gap | The host can't use or discard a potion outside combat yet. |
+| Swallowed exceptions | gap | The host reports some game exceptions only on stderr. `HeadlessGame` counts them on every run. |
+| A run per process | limit | A second `start_run` in one process fails, and the game is built on singletons, so a reset between runs isn't realistic. A pool of pre-booted processes hides the startup latency, not its CPU. |
+
+Thomas will export the branch marked "coming" to the public repo, and the
+submodule picks it up from there.
 
 ## The loop: four parts, three contracts
 
@@ -172,6 +181,27 @@ host's observation ──► adapter.encode() ──► their model's input
 host's legal action ◄── library resolves ◄── adapter.decode() ◄── their model's output
 ```
 
+### What a bot may see
+
+The observation schema is the allow-list. It is a JSON Schema closed at every
+level (`additionalProperties: false`), and the gateway refuses to send an
+observation that doesn't validate, so a field the harness adds later fails
+loudly instead of reaching a bot. Thomas's branch already renders a
+player-visible view inside the host, where the game's own rules are at hand;
+the gateway enforces the schema on top of it (see open decisions).
+
+Visibility rules, beyond the hidden fields:
+
+- An enemy's intent is hidden whenever an effect hides it in the game.
+- The second act-3 boss isn't shown before the first one falls.
+- Only the current act's map is sent.
+- Shop, event and reward contents are sent only while that screen is open.
+- Event options carry their text and visible numbers, not a resolved preview
+  of the outcome.
+
+The test is stronger than a planted field: permute the draw pile, or reseed
+anything hidden, and the observation must stay byte-identical.
+
 ### What the host gives back
 
 The host sends three kinds of message: decisions, errors and episode ends. A
@@ -188,22 +218,24 @@ after removing the hidden fields.
     "hp": 61, "max_hp": 80, "gold": 112,
     "deck": [{"instance": 41, "id": "BASH", "upgraded": false}],
     "relics": ["BURNING_BLOOD"],
-    "potions": [{"slot": 0, "id": "FIRE_POTION"}, null, null],
+    "potions": [{"slot": 0, "id": "STRENGTH_POTION"}, null],
     "map": {}
   },
   "combat": {
     "round": 2, "energy": 3, "max_energy": 3, "block": 0, "powers": [],
     "hand": [{"instance": 41, "id": "BASH", "cost": 2},
-             {"instance": 17, "id": "STRIKE_R", "cost": 1}],
-    "draw_pile": {"STRIKE_R": 3, "DEFEND_R": 4},
+             {"instance": 17, "id": "STRIKE_IRONCLAD", "cost": 1}],
+    "draw_pile": [{"id": "DEFEND_IRONCLAD", "upgraded": false, "cost": 1, "count": 4},
+                  {"id": "STRIKE_IRONCLAD", "upgraded": false, "cost": 1, "count": 2},
+                  {"id": "STRIKE_IRONCLAD", "upgraded": true, "cost": 1, "count": 1}],
     "discard_pile": [], "exhaust_pile": [],
-    "enemies": [{"index": 0, "id": "JAW_WORM", "hp": 38, "max_hp": 44, "block": 0,
-                 "intent": {"type": "attack", "damage": 11, "hits": 1}, "powers": []}]
+    "enemies": [{"index": 0, "id": "NIBBIT", "hp": 38, "max_hp": 44, "block": 0,
+                 "intent": {"type": "attack", "damage": 13, "hits": 1}, "powers": []}]
   },
   "legal_actions": [
     {"action_id": 0, "type": "play_card", "card": 41, "target": 0},
     {"action_id": 1, "type": "play_card", "card": 17, "target": 0},
-    {"action_id": 2, "type": "use_potion", "slot": 0, "target": 0},
+    {"action_id": 2, "type": "use_potion", "slot": 0},
     {"action_id": 3, "type": "end_turn"}
   ]
 }
@@ -211,12 +243,20 @@ after removing the hidden fields.
 
 - The `run` section comes with every decision. The screen section depends on
   the decision type: `combat`, `card_reward`, `shop`, `event`, `map` and so on.
-- The draw pile is sent as counts with no order. The seed, the stream counters
+- The draw pile is a sorted multiset of full card descriptors (id, upgrade,
+  enchantment, current cost) with counts, so it keeps everything a player can
+  see in the game and nothing about the order. The seed, the stream counters
   and enemy AI state are never sent.
+- **Card instance ids.** The gateway assigns them, per episode, from the
+  episode key, and never in deck or draw order. Cards in the draw pile carry
+  no instance id at all, so ids can't carry the order back in.
 - Every action uses a small vocabulary: `play_card`, `use_potion`, `end_turn`,
   `choose` (an option index for rewards, events, rest sites and the map),
-  `buy`, `select_cards` (several indices, with a minimum and maximum) and
-  `skip`.
+  `buy`, `select_cards` and `skip`.
+- **`select_cards` is one parametric action**, not a list of every subset.
+  Picking any subset of 10 cards would be 1,023 actions. The decision lists the
+  cards with the pick's minimum and maximum, the bot answers with a list of
+  card indices, and the gateway checks it against the rule.
 - `errors` carries a fixed code only. `episode_end` carries the outcome, floor
   and act, plus the episode key and full transcript so the owner can see the
   hidden draws.
@@ -240,9 +280,12 @@ runs unchanged.
 1. An `action_id` is used as given.
 2. Structured fields must match exactly one legal action. Cards are named by
    `instance`, so two Strikes are never confused. A card named by `id` instead
-   matches when every copy in hand is truly identical, with the same upgrade,
-   enchantment and cost; the library then takes the first copy, because the
-   game plays out the same either way. If the copies differ, that's an error.
+   matches when every copy in hand is identical, with the same upgrade,
+   enchantment and cost; the library then takes the first copy. This is a
+   convention, not a claim that the choice can't matter: which copy leaves the
+   hand moves the rest, and that can change what a random-card effect hits. A
+   bot that cares names the instance. If the copies differ, naming by `id` is
+   an error.
 3. No match, or an ambiguous match, raises an error on the bot's machine
    before anything is sent. The host checks legality again regardless, so a
    modified library can't cheat.
@@ -295,34 +338,49 @@ library, and a random bot, all on localhost. The dice are the harness's own
 seeded ones, which is fine because nothing is scored yet.
 
 Done when a random-bot A10 game reaches `game_over` through the library, and
-its transcript is saved.
+its transcript is saved. A transcript's header names the engine it ran on:
+the build, a hash of the game DLL, the harness commit and the schema version,
+so a replay can still be checked after a harness update.
 
 ### M2: the loop under load
 
 64 games in flight, `act_batch`, a worker pool, deadlines, error codes,
 reconnect and resume, and the observation allow-list.
 
-Done when 1,000 random games finish, with decisions per second and bytes per
-decision measured. Each guard must be shown to fail: an illegal action gets
-`illegal_action`, a repeated `seq` is ignored, a killed client's games time out
-as losses, and a planted `rng` or ordered draw-pile field never reaches the
-bot.
+Also a cap on repeated illegal actions in one game, and a deadline for a
+whole game, not only for each decision.
+
+Done when 1,000 random games finish, with decisions per second, bytes per
+decision, and memory per harness process measured. Each guard must be shown to
+fail: an illegal action gets `illegal_action`, a repeated `seq` is ignored, a
+killed client's games time out as losses, a planted field fails the closed
+schema, and a permuted draw pile gives a byte-identical observation.
 
 ### M3: keyed dice and exact replay
 
-Add the HMAC-keyed streams to the worker, using cygn's implementation if it
-applies to this harness. Add the guard that voids an episode when a draw
-reaches the game's own generator, and a replay tool.
+Take the HMAC-keyed streams and the unkeyed-draw guard from Thomas's branch
+once it is public and works on the season's build, and add a replay tool.
 
-Done when a transcript replays to the identical game, the same transcript with
-one action changed diverges, a planted unkeyed draw voids its episode, and the
-M2 suite still passes.
+Episode keys are one-way: derived from a server secret, the agent version and
+the episode number, and never reissued. That makes revealing a key to its
+owner at `episode_end` safe. A game whose worker crashes is restored by
+replaying the same actions under the same key, never by letting the bot choose
+again.
+
+Done when a transcript replays to the identical game on a different machine,
+including games that reach acts 2 and 3; the same transcript with one action
+changed diverges; a planted unkeyed draw voids its episode; the keyed game
+matches the real one in distribution (shuffle uniformity, card rarity, intent
+frequencies); and the M2 suite still passes.
 
 ### M4: real bots through adapters
 
 floor-climber is the first real entrant. Thomas's spire-mentor agent is a
 natural second, followed by cygn's and maxoley's bots. Each adapter maps the
 observation into the bot's own state format.
+
+`LocalReferee` has to run on Windows, where most authors have the game
+installed. The worker reads CPU time from `/proc` today, which is Linux only.
 
 Done when each bot completes 100 A10 games, and each author reports whether
 the observation was enough to rebuild their position (Q5). The observation
@@ -333,6 +391,14 @@ schema is frozen only after this.
 Scoring with 95% intervals, mean floor, deaths per act, win streak, owner
 reveal when a game ends, the public practice key, and a static results page.
 
+Scoring has to resist version shopping. An author could otherwise run many
+agent versions and keep the best, or stop one that is going badly. So a scored
+entry declares its size up front, every version that starts a scored game is
+listed on the results page whether it finished or not, and an unfinished entry
+counts its missing games as losses. The longest win streak grows with the
+number of games played, so it is compared only between entries of the same
+size.
+
 Done when the page shows the random bot and floor-climber, and rerunning the
 scoring script produces identical tables.
 
@@ -341,14 +407,33 @@ verifier, then cloud hosting, then a closed beta with outside bots, then
 season 0. Track 2 (fight starts) can start any time after M3, since the
 harness already builds fight starts.
 
+## Fidelity: does the harness play the real game?
+
+The README says bots play the real game, and that is a claim to measure, not
+assume. The harness runs with the game's `TestMode` on, which is what lets it
+run without Godot, and Thomas's approach is to keep it on and fix each place
+it differs. He replays recorded human runs from SpireCodex into the host: of
+300 runs on v0.111.0, 235 were at A5 or above, and 146 of those stay in sync to
+the end of the log. The other 89 aren't traced yet. No host fault is confirmed
+so far, and several mismatches turned out to be faults in the recorder or the
+replayer. Known host gaps are listed in the table above.
+
+This runs alongside the milestones rather than inside one, and the README
+carries a caveat until the untraced runs are explained. The same replays will
+also measure CPU per action across all three acts, which M0 couldn't.
+
 ## Open decisions
 
-- **The keyed dice: cygn's or our own?** If cygn's referee is built on
-  Thomas's harness, their keyed RNG patch may drop straight in at M3. Ask cygn
-  whether it does and whether they'll share it.
-- **Which build season 0 runs on.** The harness supports v0.107.1 and
-  v0.111.0. Season 0 should run on whichever build is live when it starts. A
-  new build needs a harness release from Thomas, or a patch from us.
+- **Settled: the keyed dice.** cygn's referee and Thomas's are the same
+  harness, and Thomas will make the keyed streams public.
+- **Where the observation filter lives.** Thomas proposes that the host
+  renders the player-visible view, where the game's own rules are at hand
+  (for example, which intents an effect hides), and that the gateway enforces
+  the closed schema on top, so a new host field can't leak. The gateway's
+  deny-list filter from M1 would then become a check. To agree before M2.
+- **Which build season 0 runs on.** Pin a build and announce it ahead of
+  time, rather than running on whichever build is live, so the season doesn't
+  depend on a harness port landing in time.
 - **Who owns the observation schema (Q16).** Proposed: whoever maintains the
   gateway, with changes agreed in Discord, and the schema frozen only after
   M4.

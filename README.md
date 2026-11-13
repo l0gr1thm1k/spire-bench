@@ -8,6 +8,13 @@ Status: M0. The headless game runs from your own install and plays full runs
 through a Python wrapper, and what a run costs is measured in
 [docs/M0.md](docs/M0.md). Bots cannot connect yet; that is M1.
 
+**Caveat: how faithful the harness is, is still being measured.** It runs the
+game's own code, headless, with the game's test mode on. Replaying recorded
+human runs through it, 146 of 235 runs at A5 and above stay in sync to the end;
+the rest are not traced yet, and no fault in the harness is confirmed so far.
+Known gaps: rewards are taken automatically, and potions can't be used or
+discarded outside combat. See [Fidelity](docs/PLAN.md#fidelity-does-the-harness-play-the-real-game).
+
 - Proposal: [A Shared Benchmark for Slay the Spire 2 Bots](https://docs.google.com/document/d/17AXtsWNrIExi4oN7_xp_76xpGA9BN0kVhv9Z0MxMuCg/edit)
 - Build plan: [docs/PLAN.md](docs/PLAN.md)
 

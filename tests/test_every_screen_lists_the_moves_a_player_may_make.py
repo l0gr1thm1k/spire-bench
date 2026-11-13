@@ -52,3 +52,18 @@ def test_an_optional_selection_offers_every_size_up_to_the_maximum_and_a_skip():
 
 def test_an_unknown_screen_has_no_moves():
     assert _moves({"decision": "something_new"}) == []
+
+
+def test_a_disabled_rest_site_option_is_not_a_move():
+    # The harness marks rest-site options with is_enabled (event options use is_locked).
+    view = {"decision": "rest_site", "options": [{"index": 0, "is_enabled": True}, {"index": 1, "is_enabled": False}]}
+    assert _moves(view) == [("choose_option", {"option_index": 0})]
+
+
+def test_a_shop_offers_no_potion_on_a_full_belt():
+    potions = [{"index": 0, "cost": 50, "is_stocked": True}]
+    full = {"gold": 500, "potion_slots": 2, "potions": [{"index": 0}, {"index": 1}]}
+    room = {"gold": 500, "potion_slots": 2, "potions": [{"index": 0}]}
+    for player, offered in ((full, False), (room, True)):
+        view = {"decision": "shop", "player": player, "cards": [], "relics": [], "potions": potions}
+        assert (("buy_potion", {"potion_index": 0}) in _moves(view)) is offered
