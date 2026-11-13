@@ -13,6 +13,7 @@ before anything reaches a bot.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import os
@@ -50,6 +51,41 @@ def _world_error_matcher() -> Callable[[str], bool]:
 
 def harness_dll(game_version: str = DEFAULT_GAME_VERSION, config: str = "Release") -> Path:
     return PYCLI / "src" / "Sts2Headless" / "bin" / game_version / config / "net9.0" / "Sts2Headless.dll"
+
+
+def _sha256(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _harness_commit() -> str | None:
+    try:
+        out = subprocess.run(["git", "-C", str(PYCLI.parent), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, timeout=10, check=True)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None
+
+
+def engine_identity(game_version: str = DEFAULT_GAME_VERSION, config: str = "Release") -> dict[str, str | None]:
+    """What a game ran on, so a transcript can still be checked after the harness changes.
+
+    The game DLL is hashed as shipped (``sts2.dll.original``, which the setup
+    script keeps) and as patched for headless play (``sts2.dll``).
+    """
+    lib = PYCLI / "lib" / game_version
+    return {
+        "build_id": game_version,
+        "game_dll_sha256": _sha256(lib / "sts2.dll.original") or _sha256(lib / "sts2.dll"),
+        "patched_game_dll_sha256": _sha256(lib / "sts2.dll"),
+        "harness_dll_sha256": _sha256(harness_dll(game_version, config)),
+        "harness_commit": _harness_commit(),
+    }
 
 
 def dotnet_binary() -> str:

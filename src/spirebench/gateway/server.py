@@ -44,6 +44,7 @@ class Settings:
     decision_deadline_ms: int = 5000
     max_in_flight: int = 64  # open games per owner, across all of the owner's connections
     max_games: int = 128  # open games on this gateway, across all owners
+    engine: dict[str, Any] = field(default_factory=dict)  # worker.headless.engine_identity(), for transcripts
 
 
 @dataclass
@@ -214,7 +215,8 @@ class Gateway:
         self._slots[conn.owner] -= 1
         conn.locks.pop(ep.episode_id, None)
         await asyncio.to_thread(ep.close)
-        self.store.finish(ep, self.settings.build_id)
+        engine = {**self.settings.engine, "build_id": self.settings.build_id, "schema_version": SCHEMA_VERSION}
+        self.store.finish(ep, self.settings.build_id, engine)
 
     async def _end(self, conn: _Connection, ep: Episode) -> None:
         await self._finalize(conn, ep)

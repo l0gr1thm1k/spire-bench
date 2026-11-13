@@ -3,6 +3,7 @@
 This runs the real game, so it is skipped where the harness hasn't been built.
 """
 
+import subprocess
 from pathlib import Path
 
 import jsonschema
@@ -10,8 +11,8 @@ import pytest
 
 from spirebench import Client, RandomAgent
 from spirebench.gateway.store import read_transcript
-from spirebench.protocol import load_schema
-from spirebench.worker.headless import HeadlessGame, harness_dll
+from spirebench.protocol import SCHEMA_VERSION, load_schema
+from spirebench.worker.headless import PYCLI, HeadlessGame, engine_identity, harness_dll
 
 pytestmark = pytest.mark.skipif(not harness_dll().exists(), reason="Sts2Headless not built here")
 
@@ -38,7 +39,7 @@ def _replay(header, moves):
 
 
 def test_a_random_bot_plays_a_game_to_the_end_through_the_library(gateway):
-    url, store = gateway(HeadlessGame)
+    url, store = gateway(HeadlessGame, engine=engine_identity())
     seen = []
     ends = Client(url, "dev", on_message=lambda d, m: seen.append(m)).run(
         RandomAgent(7), character="ironclad", ascension=10, episodes=1, agent_version="random-test")
@@ -53,6 +54,12 @@ def test_a_random_bot_plays_a_game_to_the_end_through_the_library(gateway):
     path, actions = store.db.execute("select transcript, actions from episodes").fetchone()
     lines = read_transcript(Path(path))
     moves = [x for x in lines if x["kind"] == "move"]
+    # The header names the engine, so the replay can be checked after a harness update.
+    engine = lines[0]["engine"]
+    assert engine["harness_commit"] == subprocess.check_output(
+        ["git", "-C", str(PYCLI.parent), "rev-parse", "HEAD"], text=True).strip()
+    assert len(engine["game_dll_sha256"]) == len(engine["harness_dll_sha256"]) == 64
+    assert engine["schema_version"] == SCHEMA_VERSION and engine["build_id"] == "v0.111.0"
     assert actions == len(moves) == len(ends[0]["reveal"]["transcript"]) > 0
 
     end = _replay(lines[0], moves)

@@ -1,7 +1,7 @@
 """Where the gateway keeps results: SQLite for episodes, one transcript file each.
 
-A transcript is zstd-compressed JSON lines: a header with the episode key,
-then one line per move, then the end. Because the harness replays a seed
+A transcript is zstd-compressed JSON lines: a header with the episode key and
+the engine the game ran on, then one line per move, then the end. Because the harness replays a seed
 exactly, the key and the moves are enough to regenerate every observation.
 """
 
@@ -73,9 +73,9 @@ class Store:
             (ep.episode_id, agent_version, ep.number, ep.character, ep.ascension, build_id, ep.seed, time.time()))
         self.db.commit()
 
-    def finish(self, ep: Episode, build_id: str) -> Path:
+    def finish(self, ep: Episode, build_id: str, engine: dict[str, Any] | None = None) -> Path:
         path = self.transcript_dir / f"{ep.episode_id}.jsonl.zst"
-        write_transcript(path, ep, build_id)
+        write_transcript(path, ep, build_id, engine)
         self.db.execute("update episodes set ended_at = ?, outcome = ?, floor = ?, act = ?, actions = ?, transcript = ?"
                         " where episode_id = ?",
                         (time.time(), ep.outcome, ep.floor, ep.act, len(ep.transcript), str(path), ep.episode_id))
@@ -83,9 +83,10 @@ class Store:
         return path
 
 
-def write_transcript(path: Path, ep: Episode, build_id: str) -> None:
-    lines = [{"kind": "header", "episode": ep.episode_id, "episode_key": ep.seed, "character": ep.character,
-              "ascension": ep.ascension, "build_id": build_id}]
+def write_transcript(path: Path, ep: Episode, build_id: str, engine: dict[str, Any] | None = None) -> None:
+    lines: list[dict[str, Any]] = [{"kind": "header", "episode": ep.episode_id, "episode_key": ep.seed,
+                                    "character": ep.character, "ascension": ep.ascension, "build_id": build_id,
+                                    "engine": engine or {"build_id": build_id}}]
     lines += [{"kind": "move", **move} for move in ep.transcript]
     lines.append({"kind": "end", "outcome": ep.outcome, "floor": ep.floor, "act": ep.act})
     raw = "".join(json.dumps(line, separators=(",", ":")) + "\n" for line in lines).encode()

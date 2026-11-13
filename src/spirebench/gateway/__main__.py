@@ -9,13 +9,13 @@ from pathlib import Path
 
 from spirebench.gateway.server import Gateway, Settings
 from spirebench.gateway.store import Store
-from spirebench.worker.headless import HeadlessGame
+from spirebench.worker.headless import HeadlessGame, engine_identity
 
 
 async def _main(args: argparse.Namespace) -> None:
     store = Store(args.data / "gateway.sqlite", args.data / "transcripts")
     tokens = {tok.partition(":")[0]: tok.partition(":")[2] or tok for tok in args.token}
-    settings = Settings(build_id=args.game_version, tokens=tokens)
+    settings = Settings(build_id=args.game_version, tokens=tokens, engine=engine_identity(args.game_version))
     gateway = Gateway(store, lambda: HeadlessGame(game_version=args.game_version), settings)
     server = await gateway.serve(args.host, args.port)
     logging.info("gateway on ws://%s:%d, game %s, data in %s", args.host, args.port, args.game_version, args.data)
