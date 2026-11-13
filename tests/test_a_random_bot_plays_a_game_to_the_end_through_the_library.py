@@ -12,7 +12,8 @@ import pytest
 from spirebench import Client, RandomAgent
 from spirebench.gateway.store import read_transcript
 from spirebench.protocol import SCHEMA_VERSION, load_schema
-from spirebench.worker.headless import PYCLI, HeadlessGame, engine_identity, harness_dll
+from spirebench.worker.headless import (DEFAULT_GAME_VERSION, PYCLI, HeadlessGame, engine_identity, harness_dll,
+                                        run_act, run_floor)
 
 pytestmark = pytest.mark.skipif(not harness_dll().exists(), reason="Sts2Headless not built here")
 
@@ -59,9 +60,10 @@ def test_a_random_bot_plays_a_game_to_the_end_through_the_library(gateway):
     assert engine["harness_commit"] == subprocess.check_output(
         ["git", "-C", str(PYCLI.parent), "rev-parse", "HEAD"], text=True).strip()
     assert len(engine["game_dll_sha256"]) == len(engine["harness_dll_sha256"]) == 64
-    assert engine["schema_version"] == SCHEMA_VERSION and engine["build_id"] == "v0.111.0"
+    assert engine["schema_version"] == SCHEMA_VERSION and engine["build_id"] == DEFAULT_GAME_VERSION
     assert actions == len(moves) == len(ends[0]["reveal"]["transcript"]) > 0
 
     end = _replay(lines[0], moves)
     assert end.get("decision") == "game_over"
-    assert (end.get("context") or {}).get("total_floor") == lines[-1]["floor"]
+    replayed = ("win" if end.get("victory") else "loss", run_floor(end), run_act(end))
+    assert replayed == (lines[-1]["outcome"], lines[-1]["floor"], lines[-1]["act"])

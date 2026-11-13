@@ -7,18 +7,23 @@ real game. Every call into it blocks; the server runs them off its event loop.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
-from spirebench.gateway.observe import legal_actions, observation
-from spirebench.worker.headless import Choice, HarnessError, legal_choices
+from spirebench.gateway.observe import action, legal_actions, observation
+from spirebench.worker.headless import Choice, Game, legal_choices, run_act, run_floor
+
+log = logging.getLogger(__name__)
 
 
-class Game(Protocol):
-    def start_run(self, character: str, ascension: int, seed: str) -> dict[str, Any]: ...
-    def act(self, verb: str, args: dict[str, Any]) -> dict[str, Any]: ...
-    def combat_actions(self) -> list[Choice]: ...
-    def close(self) -> None: ...
+def close_game(game: Game, label: str) -> None:
+    """Stop a harness. Never raises: whatever happens, the game's result still has to be recorded."""
+    try:
+        game.close()
+    except Exception:
+        log.exception("could not close the harness of %s", label)
 
 
 @dataclass
@@ -68,21 +73,19 @@ class Episode:
                 self._void()
             return "rejected"
         self.transcript.append({"seq": self.seq, "decision_type": self._view.get("decision"),
-                                "action": {"type": verb, **{k: v for k, v in args.items() if v is not None}}})
+                                "action": action((verb, args))})
         self._advance(after)
         return None
 
     def close(self) -> None:
-        try:
-            self.game.close()
-        except (HarnessError, OSError):
-            pass
+        close_game(self.game, self.episode_id)
 
-    def _call(self, fn: Any) -> dict[str, Any]:
+    def _call(self, fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        """Call the game. Anything it raises voids this game rather than escaping to the gateway."""
         try:
-            result: dict[str, Any] = fn()
-            return result
-        except (HarnessError, OSError, ValueError):
+            return fn()
+        except Exception:
+            log.exception("the game of %s failed", self.episode_id)
             self._void()
             return {}
 
@@ -96,15 +99,15 @@ class Episode:
             self._void()
             return
         self._view = view
-        ctx = view.get("context") or {}
-        self.floor = int(ctx.get("total_floor") or view.get("floor") or self.floor)
-        self.act = int(ctx.get("act") or view.get("act") or self.act)
+        self.floor = run_floor(view) or self.floor
+        self.act = run_act(view) or self.act
         if view.get("decision") == "game_over":
             self.outcome = "win" if view.get("victory") else "loss"
             return
         try:
             self._choices = legal_choices(self.game, view)  # combat asks the harness
-        except (HarnessError, OSError, ValueError):
+        except Exception:
+            log.exception("could not list the moves of %s", self.episode_id)
             self._choices = []
         if not self._choices:
             self._void()

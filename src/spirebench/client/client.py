@@ -8,10 +8,10 @@ from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
 
-from spirebench import __version__
+from spirebench._version import __version__
 from spirebench.client.agent import Agent
 from spirebench.client.resolve import resolve
-from spirebench.protocol import PROTOCOL_VERSION, Message, decode, encode
+from spirebench.protocol import MAX_MESSAGE_BYTES, PRACTICE_KEY, PROTOCOL_VERSION, Message, decode, encode
 
 
 class GatewayError(RuntimeError):
@@ -25,14 +25,28 @@ class Client:
         self.welcome: Message = {}
 
     def run(self, agent: Agent, *, character: str, ascension: int, episodes: int, agent_version: str,
-            in_flight: int = 1, key: str = "practice", metadata: dict[str, Any] | None = None) -> list[Message]:
-        """Play ``episodes`` games, ``in_flight`` at a time. Returns every episode_end message."""
+            in_flight: int = 1, key: str = PRACTICE_KEY, metadata: dict[str, Any] | None = None) -> list[Message]:
+        """Play ``episodes`` games, ``in_flight`` at a time. Returns every episode_end message.
+
+        This starts its own event loop. Inside one that is already running (a
+        notebook, an async app), await ``run_async`` instead.
+        """
+        return asyncio.run(self.run_async(agent, character=character, ascension=ascension, episodes=episodes,
+                                          agent_version=agent_version, in_flight=in_flight, key=key,
+                                          metadata=metadata))
+
+    async def run_async(self, agent: Agent, *, character: str, ascension: int, episodes: int, agent_version: str,
+                        in_flight: int = 1, key: str = PRACTICE_KEY,
+                        metadata: dict[str, Any] | None = None) -> list[Message]:
+        """``run``, for code that already has an event loop."""
+        if episodes < 1 or in_flight < 1:
+            raise ValueError(f"episodes and in_flight must be at least 1, not {episodes} and {in_flight}")
         start = {"type": "start", "agent_version": agent_version, "character": character.lower(),
                  "ascension": ascension, "key": key, "metadata": metadata or {}}
-        return asyncio.run(self._run(agent, start, episodes, max(1, min(in_flight, episodes))))
+        return await self._run(agent, start, episodes, min(in_flight, episodes))
 
     async def _run(self, agent: Agent, start: Message, episodes: int, in_flight: int) -> list[Message]:
-        async with connect(self.url, max_size=2**22) as ws:
+        async with connect(self.url, max_size=MAX_MESSAGE_BYTES) as ws:
             await self._hello(ws)
             ends: list[Message] = []
             started = in_flight
@@ -69,8 +83,16 @@ class Client:
 
     @staticmethod
     def _check_errors(errors: list[Message]) -> None:
-        # "rejected" means the game refused a move the list offered; a fresh decision follows.
-        fatal = [e for e in errors if e.get("code") != "rejected"]
+        # An error that names an episode is about that game alone, and the
+        # gateway follows it with a fresh decision ("rejected": the game refused
+        # a move the list offered) or the game's end ("internal": the harness
+        # died, so the game is void). Those are not the library's to stop on.
+        # An error with no episode is about a request: a refused start, an
+        # agent version another owner holds, a game that could not boot. The
+        # library can't continue from those, and waiting would hang.
+        # illegal_action and bad_request mean the library itself sent
+        # something wrong, so they are fatal wherever they come from.
+        fatal = [e for e in errors if "episode" not in e or e.get("code") in ("illegal_action", "bad_request")]
         if fatal:
             raise GatewayError(f"gateway errors: {fatal}")
 

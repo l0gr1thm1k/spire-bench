@@ -9,7 +9,7 @@ from pathlib import Path
 
 from spirebench.gateway.server import Gateway, Settings
 from spirebench.gateway.store import Store
-from spirebench.worker.headless import HeadlessGame, engine_identity
+from spirebench.worker.headless import DEFAULT_GAME_VERSION, HeadlessGame, engine_identity
 
 
 async def _main(args: argparse.Namespace) -> None:
@@ -26,7 +26,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--game-version", default="v0.111.0")
+    ap.add_argument("--game-version", default=DEFAULT_GAME_VERSION)
     ap.add_argument("--data", type=Path, default=Path("data/gateway"))
     ap.add_argument("--token", action="append", default=None,
                     help="accepted token as TOKEN or TOKEN:OWNER; repeat for more (default: dev)")

@@ -26,15 +26,17 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from spirebench.worker.headless import HarnessError, HeadlessGame, legal_choices
+from spirebench.protocol import CHARACTERS as _CHARACTER_NAMES
+from spirebench.worker.headless import (DEFAULT_GAME_VERSION, HarnessError, HeadlessGame, legal_choices, run_act,
+                                        run_floor)
 
-CHARACTERS = ["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"]
+CHARACTERS = list(_CHARACTER_NAMES.values())
 MAX_STEPS = 20_000
 STEP_TIMEOUT_S = 60.0  # the harness is killed if one command takes longer
 
 WARM_AFTER = 200  # actions; CPU after this many is reported as the warm cost
 
-_game_version = "v0.111.0"
+_game_version = DEFAULT_GAME_VERSION
 _policy = "random"
 
 
@@ -53,11 +55,11 @@ def _init(game_version: str, policy: str) -> None:
 
 
 def _floor(view: dict[str, Any]) -> int:
-    return int((view.get("context") or {}).get("total_floor") or 0)
+    return run_floor(view) or 0
 
 
 def _act(view: dict[str, Any]) -> int:
-    return int((view.get("context") or {}).get("act") or view.get("act") or 0)
+    return run_act(view) or 0
 
 
 def _play(game: HeadlessGame, view: dict[str, Any], rng: random.Random, row: dict[str, Any]) -> None:
@@ -184,7 +186,7 @@ def main() -> int:
     ap.add_argument("--runs-per-character", type=int, default=20)
     ap.add_argument("--ascension", type=int, default=10)
     ap.add_argument("--procs", type=int, default=8)
-    ap.add_argument("--game-version", default="v0.111.0")
+    ap.add_argument("--game-version", default=DEFAULT_GAME_VERSION)
     ap.add_argument("--seed-prefix", default="M0")
     ap.add_argument("--policy", choices=["random", "greedy"], default="random")
     ap.add_argument("--out", type=Path, required=True)

@@ -17,16 +17,18 @@ import secrets
 import string
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeGuard
 
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from spirebench.gateway.episode import Episode, Game
+from spirebench.gateway.episode import Episode, Game, close_game
 from spirebench.gateway.store import Store
-from spirebench.protocol import CHARACTERS, PROTOCOL_VERSION, SCHEMA_VERSION, Message, decode, encode
+from spirebench.protocol import (CHARACTERS, MAX_ASCENSION, MAX_MESSAGE_BYTES, PRACTICE_KEY, PROTOCOL_VERSION,
+                                 SCHEMA_VERSION, Message, decode, encode)
+from spirebench.worker.headless import DEFAULT_GAME_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -37,9 +39,13 @@ def new_seed() -> str:
     return "".join(secrets.choice(SEED_ALPHABET) for _ in range(12))
 
 
+def _is_int(value: Any) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool)  # JSON true is not a count
+
+
 @dataclass
 class Settings:
-    build_id: str = "v0.111.0"
+    build_id: str = DEFAULT_GAME_VERSION
     tokens: dict[str, str] = field(default_factory=lambda: {"dev": "dev"})  # token -> owner
     decision_deadline_ms: int = 5000
     max_in_flight: int = 64  # open games per owner, across all of the owner's connections
@@ -53,6 +59,7 @@ class _Connection:
     episodes: dict[str, Episode] = field(default_factory=dict)  # open games only
     locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     owner: str = ""  # who the token belongs to; owns the agent versions it plays
+    admit: asyncio.Lock = field(default_factory=asyncio.Lock)  # starts are admitted in the order they arrived
 
     async def send(self, msg: Message) -> None:
         await self.ws.send(encode(msg))
@@ -73,13 +80,14 @@ class Gateway:
         self.settings = settings or Settings()
         self.seed_fn = seed_fn
         self._numbers: dict[str, int] = {}
+        self._numbering = asyncio.Lock()
         # Game slots, reserved when a start is admitted and released when its
         # game ends or fails to boot. Counted per owner, not per connection,
         # so opening more connections doesn't buy more harness processes.
         self._slots: Counter[str] = Counter()
 
     async def serve(self, host: str = "127.0.0.1", port: int = 8765) -> Server:
-        return await serve(self.handle, host, port, max_size=2**22)
+        return await serve(self.handle, host, port, max_size=MAX_MESSAGE_BYTES)
 
     async def handle(self, ws: ServerConnection) -> None:
         conn = _Connection(ws)
@@ -128,8 +136,10 @@ class Gateway:
             if msg["type"] == "start":
                 await self._start(conn, msg)
             elif msg["type"] == "actions":
-                await asyncio.gather(*(self._act(conn, a) for a in msg.get("actions") or []),
-                                     return_exceptions=True)
+                actions = msg.get("actions") or []
+                results = await asyncio.gather(*(self._act(conn, a) for a in actions), return_exceptions=True)
+                await self._report(conn, results, [a.get("episode") if isinstance(a, dict) else None
+                                                   for a in actions])
             else:
                 await conn.error("bad_request")
         except ConnectionClosed:
@@ -141,41 +151,65 @@ class Gateway:
     async def _start(self, conn: _Connection, msg: Message) -> None:
         character = CHARACTERS.get(str(msg.get("character")))
         ascension, count, agent = msg.get("ascension"), msg.get("count"), msg.get("agent_version")
-        if not (character and isinstance(ascension, int) and 0 <= ascension <= 10 and isinstance(count, int)
-                and count >= 1 and isinstance(agent, str) and agent and msg.get("key") == "practice"):
+        metadata = msg.get("metadata", {})
+        if not (character and _is_int(ascension) and 0 <= ascension <= MAX_ASCENSION and _is_int(count)
+                and count >= 1 and isinstance(agent, str) and agent and isinstance(metadata, dict)
+                and msg.get("key") == PRACTICE_KEY):
             await conn.error("bad_request")
             return
-        if not self.store.claim_agent(agent, conn.owner, msg.get("metadata") or {}):
-            await conn.error("rejected")  # another owner's agent version: its streak isn't ours to extend
-            return
-        if (self._slots[conn.owner] + count > self.settings.max_in_flight
-                or sum(self._slots.values()) + count > self.settings.max_games):
-            await conn.error("not_available")
-            return
-        self._slots[conn.owner] += count  # reserved before any await, so pipelined starts can't overshoot
-        await asyncio.gather(*(self._run_new(conn, agent, str(character), ascension) for _ in range(count)),
-                             return_exceptions=True)
+        async with conn.admit:
+            if not await asyncio.to_thread(self.store.claim_agent, agent, conn.owner, metadata):
+                await conn.error("rejected")  # another owner's agent version: its streak isn't ours to extend
+                return
+            if (self._slots[conn.owner] + count > self.settings.max_in_flight
+                    or sum(self._slots.values()) + count > self.settings.max_games):
+                await conn.error("not_available")
+                return
+            self._slots[conn.owner] += count  # reserved before any await, so pipelined starts can't overshoot
+        results = await asyncio.gather(*(self._run_new(conn, agent, str(character), ascension)
+                                         for _ in range(count)), return_exceptions=True)
+        await self._report(conn, results, [None] * count)
 
-    def _number(self, agent: str) -> int:
-        if agent not in self._numbers:
-            self._numbers[agent] = self.store.next_number(agent) - 1
-        self._numbers[agent] += 1
-        return self._numbers[agent]
+    @staticmethod
+    async def _report(conn: _Connection, results: Sequence[BaseException | None], episodes: list[Any]) -> None:
+        """Tell the client about each operation that failed unexpectedly, rather than leave it waiting."""
+        for result, episode in zip(results, episodes):
+            if isinstance(result, Exception) and not isinstance(result, ConnectionClosed):
+                log.error("gateway failed on one operation", exc_info=result)
+                await conn.error("internal", str(episode) if episode else None)
+
+    async def _number(self, agent: str) -> int:
+        async with self._numbering:  # one read of the store per agent version, off the loop
+            if agent not in self._numbers:
+                self._numbers[agent] = await asyncio.to_thread(self.store.next_number, agent) - 1
+            self._numbers[agent] += 1
+            return self._numbers[agent]
 
     async def _run_new(self, conn: _Connection, agent: str, character: str, ascension: int) -> None:
         episode_id = f"e-{uuid.uuid4().hex[:12]}"
         try:
             game = await asyncio.to_thread(self.game_factory)
-        except BaseException as exc:
+        except Exception:
             self._slots[conn.owner] -= 1
-            if not isinstance(exc, (OSError, RuntimeError)):
-                raise
             log.exception("could not start a game process")
             await conn.error("internal")
             return
-        ep = Episode(episode_id, self._number(agent), character, ascension, self.seed_fn(), game)
+        except BaseException:
+            self._slots[conn.owner] -= 1
+            raise
+        try:
+            ep = Episode(episode_id, await self._number(agent), character, ascension, self.seed_fn(), game)
+            await asyncio.to_thread(self.store.begin, ep, agent, self.settings.build_id)
+        except BaseException as exc:
+            # Not registered yet, so nothing else would close this harness or give its slot back.
+            self._slots[conn.owner] -= 1
+            await asyncio.to_thread(close_game, game, episode_id)
+            if not isinstance(exc, Exception):
+                raise
+            log.exception("could not set up a game")
+            await conn.error("internal")
+            return
         conn.episodes[episode_id], conn.locks[episode_id] = ep, asyncio.Lock()
-        self.store.begin(ep, agent, self.settings.build_id)
         async with conn.locks[episode_id]:
             await asyncio.to_thread(ep.start)
             await self._next(conn, ep)
@@ -189,7 +223,7 @@ class Gateway:
         if ep is None:
             await conn.error("not_available", str(episode_id) if episode_id else None)
             return
-        if not isinstance(seq, int) or not isinstance(action_id, int):
+        if not _is_int(seq) or not _is_int(action_id):
             await conn.error("bad_request", ep.episode_id)
             return
         async with conn.locks[ep.episode_id]:
@@ -204,8 +238,15 @@ class Gateway:
 
     async def _next(self, conn: _Connection, ep: Episode) -> None:
         if not ep.over:
-            await conn.send({"type": "decisions", "decisions": [ep.decision(self.settings.decision_deadline_ms)]})
-            return
+            try:
+                # Built off the loop: scrubbing a full combat board is the hottest work per decision.
+                decision = await asyncio.to_thread(ep.decision, self.settings.decision_deadline_ms)
+            except Exception:
+                log.exception("could not build the decision for %s", ep.episode_id)
+                ep.outcome = "void"  # ended, not left open with the client waiting on it
+            else:
+                await conn.send({"type": "decisions", "decisions": [decision]})
+                return
         await self._end(conn, ep)
 
     async def _finalize(self, conn: _Connection, ep: Episode) -> None:
@@ -216,7 +257,11 @@ class Gateway:
         conn.locks.pop(ep.episode_id, None)
         await asyncio.to_thread(ep.close)
         engine = {**self.settings.engine, "build_id": self.settings.build_id, "schema_version": SCHEMA_VERSION}
-        self.store.finish(ep, self.settings.build_id, engine)
+        try:
+            await asyncio.to_thread(self.store.finish, ep, engine)
+        except Exception:
+            # The game is over either way; the row keeps no end, so it shows as unfinished, not as a result.
+            log.exception("could not record the end of %s", ep.episode_id)
 
     async def _end(self, conn: _Connection, ep: Episode) -> None:
         await self._finalize(conn, ep)

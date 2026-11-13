@@ -16,7 +16,9 @@ SCHEMA_VERSION = 0  # the observation format; not frozen until M4
 CHARACTERS = {"ironclad": "Ironclad", "silent": "Silent", "defect": "Defect",
               "regent": "Regent", "necrobinder": "Necrobinder"}
 
-ERROR_CODES = ("illegal_action", "bad_request", "not_available", "rejected", "internal")
+PRACTICE_KEY = "practice"  # the only key in v0: the harness's own seeded dice
+MAX_ASCENSION = 10
+MAX_MESSAGE_BYTES = 2**22  # both ends set this; a bigger observation would drop the connection
 
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schema" / "protocol-v0.json"
 

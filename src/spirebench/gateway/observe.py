@@ -46,11 +46,15 @@ def _scrub(value: Any, hide: frozenset[str] = HIDDEN_KEYS) -> Any:
 
 def observation(view: dict[str, Any]) -> dict[str, Any]:
     """The bot's view of one decision. The input is not changed."""
-    scrubbed: dict[str, Any] = _scrub({k: v for k, v in view.items() if k not in DROPPED_TOP_LEVEL})
-    return scrubbed
+    return dict(_scrub({k: v for k, v in view.items() if k not in DROPPED_TOP_LEVEL}))
+
+
+def action(choice: Choice) -> dict[str, Any]:
+    """A move as a bot sees it and a transcript records it: its verb and the arguments it sets."""
+    verb, args = choice
+    return {"type": verb, **{k: v for k, v in args.items() if v is not None}}
 
 
 def legal_actions(choices: list[Choice]) -> list[dict[str, Any]]:
     """Number the moves. In v0 an action's id is its position in the list."""
-    return [{"action_id": i, "type": verb, **{k: v for k, v in args.items() if v is not None}}
-            for i, (verb, args) in enumerate(choices)]
+    return [{"action_id": i, **action(c)} for i, c in enumerate(choices)]

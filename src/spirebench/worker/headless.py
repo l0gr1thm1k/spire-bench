@@ -23,7 +23,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Protocol
 
 REPO = Path(__file__).resolve().parents[3]
 PYCLI = REPO / "vendor" / "spire-mentor" / "sts2-pycli"
@@ -63,28 +63,41 @@ def _sha256(path: Path) -> str | None:
     return digest.hexdigest()
 
 
-def _harness_commit() -> str | None:
+def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
     try:
-        out = subprocess.run(["git", "-C", str(PYCLI.parent), "rev-parse", "HEAD"],
-                             capture_output=True, text=True, timeout=10, check=True)
+        return subprocess.run(["git", "-C", str(PYCLI.parent), *args], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _harness_commit() -> str | None:
+    out = _git("rev-parse", "HEAD")
+    if out is None or out.returncode != 0:
         return None
     return out.stdout.strip() or None
 
 
-def engine_identity(game_version: str = DEFAULT_GAME_VERSION, config: str = "Release") -> dict[str, str | None]:
+def _harness_dirty() -> bool | None:
+    """Whether a tracked harness file differs from the commit, so a local edit isn't passed off as it."""
+    out = _git("diff", "--quiet", "HEAD", "--")
+    return None if out is None or out.returncode > 1 else out.returncode == 1
+
+
+def engine_identity(game_version: str = DEFAULT_GAME_VERSION, config: str = "Release") -> dict[str, Any]:
     """What a game ran on, so a transcript can still be checked after the harness changes.
 
     The game DLL is hashed as shipped (``sts2.dll.original``, which the setup
-    script keeps) and as patched for headless play (``sts2.dll``).
+    script keeps) and as patched for headless play (``sts2.dll``). A file
+    that isn't there is recorded as None, never as another file's hash.
     """
     lib = PYCLI / "lib" / game_version
     return {
         "build_id": game_version,
-        "game_dll_sha256": _sha256(lib / "sts2.dll.original") or _sha256(lib / "sts2.dll"),
+        "game_dll_sha256": _sha256(lib / "sts2.dll.original"),
         "patched_game_dll_sha256": _sha256(lib / "sts2.dll"),
         "harness_dll_sha256": _sha256(harness_dll(game_version, config)),
         "harness_commit": _harness_commit(),
+        "harness_dirty": _harness_dirty(),
     }
 
 
@@ -281,6 +294,26 @@ class HeadlessGame:
 Choice = tuple[str, dict[str, Any]]
 
 
+class Game(Protocol):
+    """What the gateway needs from a game: HeadlessGame, or a scripted stand-in in tests."""
+
+    def start_run(self, character: str, ascension: int, seed: str) -> dict[str, Any]: ...
+    def act(self, verb: str, args: dict[str, Any]) -> dict[str, Any]: ...
+    def combat_actions(self) -> list[Choice]: ...
+    def close(self) -> None: ...
+
+
+def run_floor(view: dict[str, Any]) -> int | None:
+    """The floor counted across the whole run (``total_floor``), not the per-act ``floor``."""
+    floor = (view.get("context") or {}).get("total_floor")
+    return int(floor) if floor else None
+
+
+def run_act(view: dict[str, Any]) -> int | None:
+    act = (view.get("context") or {}).get("act") or view.get("act")
+    return int(act) if act else None
+
+
 def _options(view: dict[str, Any]) -> list[Choice]:
     # Event options carry is_locked; rest-site options carry is_enabled.
     out = [("choose_option", {"option_index": o["index"]}) for o in view.get("options") or []
@@ -350,7 +383,7 @@ _SCREENS = {
 }
 
 
-def legal_choices(game: Any, view: dict[str, Any]) -> list[Choice]:
+def legal_choices(game: Game, view: dict[str, Any]) -> list[Choice]:
     """Every move the player may make on this screen, as (verb, args) pairs.
 
     In combat the harness lists the moves itself. Elsewhere they are read off

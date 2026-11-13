@@ -6,6 +6,7 @@ Each test plants the violation and checks the fixed error code comes back.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -148,19 +149,29 @@ def test_a_game_whose_harness_dies_is_ended_as_void_not_left_open(gateway):
 
 
 class SlowStartGame(ScriptedGame):
+    """Boots only when the test lets it, so a second start can arrive while the first is booting."""
+
+    booting = threading.Event()
+    release = threading.Event()
+
     def __init__(self):
-        time.sleep(0.3)  # a harness process takes a while to boot
+        SlowStartGame.booting.set()
+        assert SlowStartGame.release.wait(10)
         super().__init__()
 
 
 def test_starts_sent_back_to_back_cannot_open_more_games_than_the_limit(gateway):
+    SlowStartGame.booting.clear()
+    SlowStartGame.release.clear()
     url, store = gateway(SlowStartGame, max_in_flight=2)
     with connect(url) as ws:
         ws.send(json.dumps(HELLO))
         _recv(ws)
         ws.send(json.dumps({**START, "count": 2}))
+        assert SlowStartGame.booting.wait(10)
         ws.send(json.dumps({**START, "count": 1}))  # arrives while the first two are still booting
         first = _recv(ws)
+        SlowStartGame.release.set()
         assert first == {"type": "errors", "errors": [{"code": "not_available"}]}
         assert {_recv(ws)["type"], _recv(ws)["type"]} == {"decisions"}
     assert store.db.execute("select count(*) from episodes").fetchone() == (2,)
@@ -213,3 +224,117 @@ def test_the_gateway_caps_games_across_all_owners(gateway):
         assert _recv(alice)["type"] == "decisions"
         bob.send(json.dumps({**START, "agent_version": "bob-bot"}))
         assert _recv(bob) == {"type": "errors", "errors": [{"code": "not_available"}]}
+
+
+def test_a_boolean_is_not_accepted_where_a_number_is(gateway):
+    url, store = gateway(ScriptedGame)
+    with connect(url) as ws:
+        ws.send(json.dumps(HELLO))
+        _recv(ws)
+        for bad in ({"count": True}, {"ascension": True}, {"metadata": "not an object"}):
+            ws.send(json.dumps({**START, **bad}))
+            assert _recv(ws) == {"type": "errors", "errors": [{"code": "bad_request"}]}, bad
+        ws.send(json.dumps(START))
+        d = _recv(ws)["decisions"][0]
+        _act(ws, d, True)
+        assert _recv(ws)["errors"][0]["code"] == "bad_request"
+    assert store.db.execute("select count(*) from episodes").fetchone() == (1,)
+
+
+def _unbootable():
+    raise ValueError("the harness printed something that isn't JSON")
+
+
+def test_a_game_that_fails_to_boot_in_an_unexpected_way_is_reported_not_left_hanging(gateway):
+    url, _ = gateway(_unbootable)
+    with _session(url) as ws:
+        assert _recv(ws) == {"type": "errors", "errors": [{"code": "internal"}]}
+
+
+class UnclosableGame(ScriptedGame):
+    def close(self):
+        raise RuntimeError("the harness would not stop")
+
+
+def test_a_harness_that_will_not_close_still_has_its_result_recorded(gateway):
+    url, store = gateway(UnclosableGame)
+    with _session(url) as ws:
+        for _ in range(3):
+            _act(ws, _recv(ws)["decisions"][0], 0)
+        assert _recv(ws)["outcome"] == "win"
+    assert store.db.execute("select outcome from episodes").fetchone() == ("win",)
+
+
+def test_a_result_that_cannot_be_written_still_frees_the_game_slot(gateway):
+    url, store = gateway(ScriptedGame, max_in_flight=1)
+
+    def disk_full(*args):
+        raise OSError("no space left on device")
+
+    store.finish = disk_full
+    with _session(url) as ws:
+        for _ in range(3):
+            _act(ws, _recv(ws)["decisions"][0], 0)
+        assert _recv(ws)["type"] == "episode_end"
+        ws.send(json.dumps(START))
+        assert _recv(ws)["type"] == "decisions"  # the slot came back
+    assert store.db.execute("select outcome from episodes order by number").fetchall() == [(None,), (None,)]
+
+
+class TrackedGame(ScriptedGame):
+    closed = 0
+
+    def close(self):
+        TrackedGame.closed += 1
+
+
+def test_a_start_that_fails_after_the_game_boots_is_reported_and_gives_its_harness_and_slot_back(gateway):
+    TrackedGame.closed = 0
+    url, store = gateway(TrackedGame, max_in_flight=1)
+    begin = store.begin
+
+    def locked(*args):
+        raise RuntimeError("database is locked")
+
+    store.begin = locked
+    with _session(url) as ws:
+        assert _recv(ws) == {"type": "errors", "errors": [{"code": "internal"}]}
+        assert TrackedGame.closed == 1
+        store.begin = begin
+        ws.send(json.dumps(START))
+        assert _recv(ws)["type"] == "decisions"  # the slot came back
+
+
+class SurprisingGame(ScriptedGame):
+    def act(self, verb, args):
+        raise KeyError("a bug in the harness wrapper, not a harness error")
+
+
+def test_a_game_that_fails_in_an_unexpected_way_is_ended_as_void_not_left_open(gateway):
+    url, store = gateway(SurprisingGame)
+    with _session(url) as ws:
+        _act(ws, _recv(ws)["decisions"][0], 0)
+        assert _recv(ws)["errors"][0]["code"] == "internal"
+        end = _recv(ws)
+    assert (end["type"], end["outcome"]) == ("episode_end", "void")
+
+
+def test_starts_are_admitted_in_the_order_they_arrived(gateway):
+    url, store = gateway(ScriptedGame, max_in_flight=1)
+    claim, calls = store.claim_agent, []
+
+    def slow_first_claim(agent, *args):
+        calls.append(agent)
+        if len(calls) == 1:
+            time.sleep(0.3)  # the first start's claim is slow; the second must still wait its turn
+        return claim(agent, *args)
+
+    store.claim_agent = slow_first_claim
+    with connect(url) as ws:
+        ws.send(json.dumps(HELLO))
+        _recv(ws)
+        ws.send(json.dumps({**START, "agent_version": "first"}))
+        ws.send(json.dumps({**START, "agent_version": "second"}))
+        got = [_recv(ws)["type"], _recv(ws)["type"]]
+    assert sorted(got) == ["decisions", "errors"]
+    assert store.db.execute("select agent_version from episodes").fetchall() == [("first",)]
