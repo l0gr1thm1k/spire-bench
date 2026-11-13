@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+# Game files never enter this repo: each operator builds from their own install.
+*.dll
+lib/
+data/
+transcripts/
+*.sqlite
+.idea/
