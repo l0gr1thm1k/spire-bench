@@ -10,8 +10,8 @@ which he has offered for the benchmark. It is a companion to the proposal,
 | Milestone | What it delivers | State |
 |---|---|---|
 | M0 | `Sts2Headless` builds here; full A10 runs measured | done, see [M0.md](M0.md) |
-| M1 | One game end to end: schema v0, gateway, library, random bot on localhost | next |
-| M2 | The loop under load: 64 in flight, batching, deadlines, errors, reconnect, allow-list, each guard shown to fail | |
+| M1 | One game end to end: schema v0, gateway, library, random bot on localhost | done, see [M1.md](M1.md) |
+| M2 | The loop under load: 64 in flight, batching, deadlines, errors, reconnect, allow-list, each guard shown to fail | next |
 | M3 | Keyed dice, the unkeyed-draw guard, exact replay | |
 | M4 | Real bots through adapters (floor-climber, spire-mentor, cygn, maxoley) and the conformance kit | |
 | M5 | Scoring, win streaks, owner reveal, practice key, static results page | |
@@ -331,7 +331,7 @@ Build `Sts2Headless` against our own install, then play full A10 runs by
 driving the pipe directly. Done when we have measured actions per full run,
 CPU per action, and startup cost. Results: [M0.md](M0.md).
 
-### M1: one game end to end
+### M1: one game end to end (done)
 
 Protocol schema v0, a minimal gateway (Python, WebSocket, SQLite), the
 library, and a random bot, all on localhost. The dice are the harness's own

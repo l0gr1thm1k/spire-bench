@@ -4,9 +4,21 @@ A shared benchmark for Slay the Spire 2 bots. Bots play the real game on a
 referee they don't control, with dice nobody can predict, and every result can
 be replayed and checked after the season.
 
-Status: M0. The headless game runs from your own install and plays full runs
-through a Python wrapper, and what a run costs is measured in
-[docs/M0.md](docs/M0.md). Bots cannot connect yet; that is M1.
+Status: M1. A bot written against the library plays the real game through
+the gateway on localhost, and every game's result and transcript are saved.
+See [docs/M1.md](docs/M1.md) to try it, and [docs/M0.md](docs/M0.md) for what
+a run costs.
+
+```python
+from spirebench import Agent, Client
+
+class MyBot(Agent):
+    def act(self, decision):
+        return 0  # an index into decision["legal_actions"], a legal action, or matching fields
+
+Client("ws://127.0.0.1:8765", token="dev").run(
+    MyBot(), character="ironclad", ascension=10, episodes=10, agent_version="my-bot-v1")
+```
 
 **Caveat: how faithful the harness is, is still being measured.** It runs the
 game's own code, headless, with the game's test mode on. Replaying recorded
@@ -22,8 +34,8 @@ discarded outside combat. See [Fidelity](docs/PLAN.md#fidelity-does-the-harness-
 
 | Path | What it is |
 |---|---|
-| `src/spirebench/client/` | The library bot authors use: `Agent`, `Client`, `LocalReferee`, action resolution |
-| `src/spirebench/gateway/` | The referee's front door: accounts, deadlines, allow-list filter, transcripts, scoring |
+| `src/spirebench/client/` | The library bot authors use: `Agent`, `Client`, action resolution |
+| `src/spirebench/gateway/` | The referee's front door: token check, observation filter, episodes, transcripts |
 | `src/spirebench/worker/` | Runs one game per process by driving the headless game over a pipe |
 | `schema/` | The protocol and observation JSON Schema, the source of truth for every client |
 | `vendor/spire-mentor/` | Thomas Friedel's spire-mentor (MIT), pinned; we build its `Sts2Headless` harness |
