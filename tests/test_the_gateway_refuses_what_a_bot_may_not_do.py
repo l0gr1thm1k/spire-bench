@@ -36,7 +36,8 @@ class ScriptedGame:
         return {"type": "decision", "decision": "event_choice", "context": {"act": 1, "total_floor": self.moves},
                 "options": [{"index": 0}, {"index": 1}], "rng": {"run_seed": 1}}
 
-    def start_run(self, character, ascension, seed):
+    def start_run(self, character, ascension, key):
+        assert isinstance(key, bytes) and len(key) == 32, "the game is handed the episode key itself"
         return self._view()
 
     def act(self, verb, args):

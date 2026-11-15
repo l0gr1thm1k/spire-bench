@@ -109,9 +109,9 @@ def play_one(job: tuple[str, int, str]) -> dict[str, Any]:
     wall0 = time.perf_counter()
     game: HeadlessGame | None = None
     try:
-        with HeadlessGame(game_version=_game_version, timeout_s=STEP_TIMEOUT_S) as game:
+        with HeadlessGame(game_version=_game_version, keyed=False, timeout_s=STEP_TIMEOUT_S) as game:
             row["boot_s"], row["boot_cpu_s"] = time.perf_counter() - wall0, game.cpu_times().total
-            view = game.start_run(character, ascension, seed)
+            view = game.start_seeded_run(character, ascension, seed)
             row["start_s"] = time.perf_counter() - wall0 - row["boot_s"]
             row["start_cpu_s"] = game.cpu_times().total - row["boot_cpu_s"]
             row["act1"] = (view.get("context") or {}).get("act_name")

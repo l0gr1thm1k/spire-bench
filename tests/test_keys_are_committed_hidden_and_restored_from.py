@@ -19,7 +19,7 @@ from test_the_gateway_refuses_what_a_bot_may_not_do import ScriptedGame, _act, _
 from spirebench import Client, RandomAgent
 from spirebench.client import GatewayError
 from spirebench.gateway import server
-from spirebench.gateway.keys import derive_key, harness_seed
+from spirebench.gateway.keys import derive_key
 from spirebench.gateway.store import Store, read_transcript
 from spirebench.worker.headless import HarnessError
 
@@ -115,7 +115,7 @@ def test_no_key_is_written_to_the_database_or_a_transcript(gateway):
     path, = store.db.execute("select transcript from episodes").fetchone()
     raw = zstandard.ZstdDecompressor().stream_reader(Path(path).open("rb")).read().decode()
     for text in ("\n".join(store.db.iterdump()), raw):
-        assert key not in text.lower() and harness_seed(bytes.fromhex(key)).lower() not in text.lower()
+        assert key not in text.lower()
 
 
 def test_every_field_of_a_key_changes_it():

@@ -58,7 +58,7 @@ def test_a_real_process_has_every_error_counted_by_the_time_it_is_closed(tmp_pat
     dll.write_text("")
     # The command line is [dotnet, dll]; the fake ignores the dll argument.
     monkeypatch.setenv("DOTNET", str(fake))
-    monkeypatch.setattr(headless, "harness_dll", lambda *a, **k: dll)
+    monkeypatch.setattr(headless, "worker_dll", lambda *a, **k: dll)
     log = tmp_path / "stderr.log"
     with HeadlessGame(stderr_path=log) as game:
         pass

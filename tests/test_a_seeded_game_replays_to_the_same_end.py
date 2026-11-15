@@ -1,21 +1,24 @@
-"""Two harness processes given the same seed and the same moves reach the same end.
+"""Two upstream harness processes given the same seed string and the same moves reach the same end.
 
-This runs the real game, so it is skipped where the harness hasn't been built.
+This measures the game itself, on the upstream (seed string) build; the keyed
+build the gateway plays on has its own tests. It runs the real game, so it is
+skipped where the harness hasn't been built.
 """
 
 import random
 
 import pytest
+from conftest import GAME_VERSION
 
 from spirebench.worker.headless import HeadlessGame, harness_dll, legal_choices
 
-pytestmark = pytest.mark.skipif(not harness_dll().exists(), reason="Sts2Headless not built here")
+pytestmark = pytest.mark.skipif(not harness_dll(GAME_VERSION).exists(), reason="Sts2Headless not built here")
 
 
 def _play(seed: str, move_seed: int) -> tuple:
     rng = random.Random(move_seed)
-    with HeadlessGame() as game:
-        view = game.start_run("Ironclad", 10, seed)
+    with HeadlessGame(GAME_VERSION, keyed=False) as game:
+        view = game.start_seeded_run("Ironclad", 10, seed)
         trace = []
         for _ in range(5000):
             if view.get("decision") == "game_over":
@@ -43,12 +46,12 @@ def test_a_harness_that_does_not_answer_in_time_is_killed():
     from spirebench.worker.headless import HarnessError
 
     with pytest.raises(HarnessError, match="timed out"):
-        HeadlessGame(timeout_s=0.05)
+        HeadlessGame(GAME_VERSION, keyed=False, timeout_s=0.05)
 
 
 def _act_one(seed: str) -> str:
-    with HeadlessGame() as game:
-        view = game.start_run("Ironclad", 10, seed)
+    with HeadlessGame(GAME_VERSION, keyed=False) as game:
+        view = game.start_seeded_run("Ironclad", 10, seed)
     assert view.get("type") != "error", view
     return str((view.get("context") or {}).get("act_name"))
 

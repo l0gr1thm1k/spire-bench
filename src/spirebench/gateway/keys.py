@@ -37,15 +37,6 @@ def derive_key(secret: bytes, kind: str, season: str, agent_version: str, number
     return hmac.new(secret, message, hashlib.sha256).digest()
 
 
-def harness_seed(key: bytes) -> str:
-    """STOPGAP until the harness takes a key (M3 slice 2): the key as a seed string.
-
-    The game reduces a seed string to its own seed (32 bits on v0.107.1), so
-    games keyed this way are practice only and must never be scored.
-    """
-    return key.hex().upper()
-
-
 def load_secret(path: Path) -> bytes:
     """A season secret file holds 64 hex digits."""
     text = path.read_text().strip()

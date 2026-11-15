@@ -17,7 +17,7 @@ SCHEMA_VERSION = 0  # the observation format; not frozen until M4
 CHARACTERS = {"ironclad": "Ironclad", "silent": "Silent", "defect": "Defect",
               "regent": "Regent", "necrobinder": "Necrobinder"}
 
-PRACTICE_KEY = "practice"  # the only key in v0; no game is scored until the harness takes keys (M3 slice 2)
+PRACTICE_KEY = "practice"  # the only key in v0; no game is scored before M3 slice 4 and M5
 MAX_ASCENSION = 10
 MAX_MESSAGE_BYTES = 2**22  # both ends set this; a bigger observation would drop the connection
 

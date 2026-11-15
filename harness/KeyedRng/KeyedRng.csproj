@@ -1,0 +1,10 @@
+<!-- The game's draws under an episode key. The patched sts2.dll and Sts2Headless.dll call into it (harness/KeyedPatcher). -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <RollForward>LatestMajor</RollForward>
+    <AssemblyName>KeyedRng</AssemblyName>
+    <RootNamespace>SpireBench.Keyed</RootNamespace>
+  </PropertyGroup>
+</Project>

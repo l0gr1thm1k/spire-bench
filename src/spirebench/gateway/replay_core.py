@@ -32,9 +32,9 @@ class Replayed:
     reason: str = ""
 
 
-def replay(game: Game, character: str, ascension: int, seed: str, moves: list[dict[str, Any]]) -> Replayed:
+def replay(game: Game, character: str, ascension: int, key: bytes, moves: list[dict[str, Any]]) -> Replayed:
     """Start the game and make each move, stopping at the first one that doesn't match the record."""
-    view = game.start_run(character, ascension, seed)
+    view = game.start_run(character, ascension, key)
     for i, move in enumerate(moves):
         if view_digest(view) != move["digest"]:
             return Replayed(view, i, "the decision differs")

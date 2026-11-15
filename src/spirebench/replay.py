@@ -15,7 +15,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from spirebench.gateway.keys import harness_seed
 from spirebench.gateway.replay_core import replay, view_digest
 from spirebench.gateway.store import read_transcript
 from spirebench.protocol import SCHEMA_VERSION, commitment
@@ -31,7 +30,7 @@ def verify(lines: list[dict[str, Any]], key: bytes, game: Game) -> str:
     """Replay a transcript's moves under ``key``: ``identical``, or where it first differs."""
     header, end = lines[0], lines[-1]
     moves = [line for line in lines if line["kind"] == "move"]
-    got = replay(game, header["character"], header["ascension"], harness_seed(key), moves)
+    got = replay(game, header["character"], header["ascension"], key, moves)
     if got.diverged_at is not None:
         move = moves[got.diverged_at]
         return f"differs at move {got.diverged_at} (seq {move['seq']}): {got.reason}"

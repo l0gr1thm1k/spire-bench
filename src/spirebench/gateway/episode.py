@@ -17,7 +17,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
-from spirebench.gateway.keys import harness_seed
 from spirebench.gateway.observe import action, legal_actions, observation
 from spirebench.gateway.replay_core import replay, view_digest
 from spirebench.protocol import commitment
@@ -68,7 +67,7 @@ class Episode:
         return commitment(self.key)
 
     def start(self) -> None:
-        view = self._call(lambda: self.game.start_run(self.character, self.ascension, harness_seed(self.key)))
+        view = self._call(lambda: self.game.start_run(self.character, self.ascension, self.key))
         if view is not None:
             self._advance(view)
 
@@ -136,7 +135,7 @@ class Episode:
             self.game = self.factory()
             if not self._view:
                 return True  # died booting: the retry boots the new worker
-            got = replay(self.game, self.character, self.ascension, harness_seed(self.key), self.transcript)
+            got = replay(self.game, self.character, self.ascension, self.key, self.transcript)
         except Exception:
             log.exception("could not restore %s", self.episode_id)
             self.void("restore_failed")

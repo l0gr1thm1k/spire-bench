@@ -32,13 +32,13 @@ class OneCrashingGame(ScriptedGame):
 
     doomed: str | None = None
 
-    def start_run(self, character, ascension, seed):
-        OneCrashingGame.doomed = OneCrashingGame.doomed or seed
-        self.seed = seed
-        return super().start_run(character, ascension, seed)
+    def start_run(self, character, ascension, key):
+        OneCrashingGame.doomed = OneCrashingGame.doomed or key
+        self.key = key
+        return super().start_run(character, ascension, key)
 
     def act(self, verb, args):
-        if self.seed == OneCrashingGame.doomed:
+        if self.key == OneCrashingGame.doomed:
             raise HarnessError("harness exited (code 134)")
         return super().act(verb, args)
 

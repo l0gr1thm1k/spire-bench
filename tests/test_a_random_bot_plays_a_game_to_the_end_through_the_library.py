@@ -8,14 +8,14 @@ from pathlib import Path
 
 import jsonschema
 import pytest
+from conftest import GAME_VERSION
 
 from spirebench import Client, RandomAgent
 from spirebench.gateway.store import read_transcript
 from spirebench.protocol import SCHEMA_VERSION, load_schema
-from spirebench.worker.headless import (DEFAULT_GAME_VERSION, PYCLI, HeadlessGame, engine_identity, harness_dll,
-                                        run_act, run_floor)
+from spirebench.worker.headless import PYCLI, HeadlessGame, engine_identity, run_act, run_floor, worker_dll
 
-pytestmark = pytest.mark.skipif(not harness_dll().exists(), reason="Sts2Headless not built here")
+pytestmark = pytest.mark.skipif(not worker_dll(GAME_VERSION).exists(), reason="keyed harness not built here")
 
 
 def _keys(value):
@@ -28,10 +28,10 @@ def _keys(value):
             yield from _keys(v)
 
 
-def _replay(header, moves):
+def _replay(header, key, moves):
     """Play the transcript's moves into a fresh game; the end must be the one recorded."""
-    with HeadlessGame() as game:
-        view = game.start_run(header["character"], header["ascension"], header["episode_key"])
+    with HeadlessGame(GAME_VERSION) as game:
+        view = game.start_run(header["character"], header["ascension"], key)
         for move in moves:
             args = {k: v for k, v in move["action"].items() if k != "type"}
             view = game.act(move["action"]["type"], args)
@@ -40,7 +40,8 @@ def _replay(header, moves):
 
 
 def test_a_random_bot_plays_a_game_to_the_end_through_the_library(gateway):
-    url, store = gateway(HeadlessGame, engine=engine_identity())
+    url, store = gateway(lambda: HeadlessGame(GAME_VERSION), engine=engine_identity(GAME_VERSION),
+                         build_id=GAME_VERSION)
     seen = []
     ends = Client(url, "dev", on_message=lambda d, m: seen.append(m)).run(
         RandomAgent(7), character="ironclad", ascension=10, episodes=1, agent_version="random-test")
@@ -59,11 +60,12 @@ def test_a_random_bot_plays_a_game_to_the_end_through_the_library(gateway):
     engine = lines[0]["engine"]
     assert engine["harness_commit"] == subprocess.check_output(
         ["git", "-C", str(PYCLI.parent), "rev-parse", "HEAD"], text=True).strip()
-    assert len(engine["game_dll_sha256"]) == len(engine["harness_dll_sha256"]) == 64
-    assert engine["schema_version"] == SCHEMA_VERSION and engine["build_id"] == DEFAULT_GAME_VERSION
+    hashed = ("game_dll_sha256", "patched_game_dll_sha256", "harness_dll_sha256", "keyed_rng_dll_sha256")
+    assert all(len(engine[k]) == 64 for k in hashed), engine
+    assert engine["schema_version"] == SCHEMA_VERSION and engine["build_id"] == GAME_VERSION
     assert actions == len(moves) == len(ends[0]["reveal"]["transcript"]) > 0
 
-    end = _replay(lines[0], moves)
+    end = _replay(lines[0], bytes.fromhex(ends[0]["reveal"]["episode_key"]), moves)
     assert end.get("decision") == "game_over"
     replayed = ("win" if end.get("victory") else "loss", run_floor(end), run_act(end))
     assert replayed == (lines[-1]["outcome"], lines[-1]["floor"], lines[-1]["act"])

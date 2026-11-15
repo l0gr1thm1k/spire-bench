@@ -48,7 +48,7 @@ until acts 2 and 3 are measured. See [M0.md](M0.md).
 | Decision types | have | `map_select`, `combat_play`, `card_reward`, `card_select`, `bundle_select`, `event_choice`, `rest_site`, `shop`, `potion_swap`, `game_over`, and `unknown` for a screen the harness doesn't recognize. cygn's referee is built on this same harness. |
 | Legal actions | have | A `legal_actions` command lists combat moves. Other screens list their options in the state, and `spirebench.worker.headless.legal_choices` turns them into moves. |
 | Fight starts (Track 2) | have | `set_player` and `enter_room` build a fight from a given deck, relics and encounter. Only the referee may call them. |
-| Keyed dice | coming | The public harness uses the game's own seeded generator. Thomas has HMAC-keyed streams with the unkeyed-draw guard on a private branch; it works on v0.107.1, and the v0.111.0 generator is still a stub. |
+| Keyed dice | have (v0.107.1) | `harness/build_keyed.sh` patches the pinned harness: every generator draws from a keyed ChaCha20 stream, other randomness raises, and seed strings are refused. Verified on v0.107.1 only; v0.111.0 is not yet built or checked. See [M3.md](M3.md). |
 | Player-visible view | coming | The raw state includes the draw pile in order and an `rng` block with the run seed and stream counters, both needed for parity testing. Thomas's branch renders a player-visible view inside the host, from an allow-list. |
 | Locked command set | coming | Debug commands (`set_draw_order`, `rng_probe`, `dump_*`, `get_trace`, `load_save`, ...) must be unreachable by a bot. On Thomas's branch; bots never talk to the worker directly in any case. |
 | Crystal Sphere | coming | The public harness completes the minigame automatically. A decision on Thomas's branch, as in cygn's referee. |
@@ -75,8 +75,8 @@ without breaking their code, as long as each contract holds.
 
 - **A. Worker ↔ gateway.** JSON lines on the worker's stdin and stdout, the
   harness's native interface. A pipe means the worker needs no network at all.
-  The gateway sends only `start {seed, character, ascension}` (the seed comes
-  from the episode key; M3 slice 2 passes the key itself),
+  The gateway sends only `start {key, character, ascension}` (the 32-byte
+  episode key; the keyed harness refuses a seed string),
   `action {...}` and `close`.
 - **B. Gateway ↔ library.** A versioned JSON protocol over WebSocket, with
   compression on. A JSON Schema file in `schema/` is the source of truth. This

@@ -7,8 +7,9 @@ into it runs in a thread so the event loop stays free.
 Each game's key is an HMAC of the season secret, fixed and committed to
 (``episode_start``) before the game boots, and revealed at its end. M1/M2
 scope otherwise: one practice key, a token check against a fixed set, and the
-deadline sent but not enforced. Until the harness takes keyed streams (M3
-slice 2) the key reaches the game as a seed string, so nothing is scored.
+deadline sent but not enforced. The key itself reaches the keyed harness,
+which draws every stream from it; nothing is scored until the distribution
+checks (M3 slice 4) and the season machinery (M5) land.
 """
 
 from __future__ import annotations
