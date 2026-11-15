@@ -11,7 +11,8 @@ from websockets.asyncio.client import ClientConnection, connect
 from spirebench._version import __version__
 from spirebench.client.agent import Agent
 from spirebench.client.resolve import resolve
-from spirebench.protocol import MAX_MESSAGE_BYTES, PRACTICE_KEY, PROTOCOL_VERSION, Message, decode, encode
+from spirebench.protocol import (MAX_MESSAGE_BYTES, PRACTICE_KEY, PROTOCOL_VERSION, Message, commitment, decode,
+                                 encode)
 
 
 class GatewayError(RuntimeError):
@@ -49,13 +50,17 @@ class Client:
         async with connect(self.url, max_size=MAX_MESSAGE_BYTES) as ws:
             await self._hello(ws)
             ends: list[Message] = []
+            commits: dict[str, str] = {}  # episode -> commit, from episode_start
             started = in_flight
             await self._send(ws, {**start, "count": in_flight})
             while len(ends) < episodes:
                 msg = await self._recv(ws)
-                if msg["type"] == "decisions":
+                if msg["type"] == "episode_start":
+                    commits[msg["episode"]] = msg["commit"]
+                elif msg["type"] == "decisions":
                     await self._answer(ws, agent, msg["decisions"])
                 elif msg["type"] == "episode_end":
+                    self._check_reveal(msg, commits.pop(msg["episode"], None))
                     ends.append(msg)
                     agent.episode_end(msg)
                     if started < episodes:
@@ -82,11 +87,24 @@ class Client:
         await self._send(ws, {"type": "actions", "actions": actions})
 
     @staticmethod
+    def _check_reveal(end: Message, commit: str | None) -> None:
+        """The revealed key must be the one committed to before the game started."""
+        if commit is None:
+            raise GatewayError(f"episode {end['episode']} ended without having been committed to")
+        key = end.get("reveal", {}).get("episode_key")  # absent is refused below
+        try:
+            ok = isinstance(key, str) and commitment(bytes.fromhex(key)) == commit
+        except ValueError:
+            ok = False
+        if not ok:
+            raise GatewayError(f"episode {end['episode']} revealed a key that does not match its commit {commit}")
+
+    @staticmethod
     def _check_errors(errors: list[Message]) -> None:
         # An error that names an episode is about that game alone, and the
         # gateway follows it with a fresh decision ("rejected": the game refused
-        # a move the list offered) or the game's end ("internal": the harness
-        # died, so the game is void). Those are not the library's to stop on.
+        # a move the list offered) or the game's end ("internal": the game
+        # could not be carried on, so it is void). Those are not the library's to stop on.
         # An error with no episode is about a request: a refused start, an
         # agent version another owner holds, a game that could not boot. The
         # library can't continue from those, and waiting would hang.

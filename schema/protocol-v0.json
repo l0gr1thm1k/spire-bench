@@ -10,6 +10,7 @@
     {"$ref": "#/$defs/decisions"},
     {"$ref": "#/$defs/actions"},
     {"$ref": "#/$defs/errors"},
+    {"$ref": "#/$defs/episode_start"},
     {"$ref": "#/$defs/episode_end"}
   ],
   "$defs": {
@@ -30,13 +31,15 @@
     "welcome": {
       "description": "server → client, the answer to hello.",
       "type": "object",
-      "required": ["type", "protocol_version", "build_id", "schema_version", "limits"],
+      "required": ["type", "protocol_version", "build_id", "schema_version", "season", "season_commitment", "limits"],
       "additionalProperties": false,
       "properties": {
         "type": {"const": "welcome"},
         "protocol_version": {"type": "integer"},
         "build_id": {"type": "string", "description": "The game build every episode on this gateway runs."},
         "schema_version": {"type": "integer", "description": "Version of the observation format."},
+        "season": {"type": "string", "minLength": 1, "description": "Every key on this gateway derives from this season's secret."},
+        "season_commitment": {"$ref": "#/$defs/digest", "description": "SHA-256 of the season secret, which is published when the season ends."},
         "limits": {
           "type": "object",
           "required": ["decision_deadline_ms", "max_in_flight"],
@@ -58,7 +61,7 @@
         "agent_version": {"type": "string", "minLength": 1},
         "character": {"enum": ["ironclad", "silent", "defect", "regent", "necrobinder"]},
         "ascension": {"type": "integer", "minimum": 0, "maximum": 10},
-        "key": {"enum": ["practice"], "description": "Only practice exists until keyed dice land in M3."},
+        "key": {"enum": ["practice"], "description": "Only practice exists until the harness takes keyed streams (M3 slice 2)."},
         "count": {"type": "integer", "minimum": 1},
         "metadata": {"type": "object", "description": "Free-form run metadata (checkpoint, sims, hardware), stored with the agent version."}
       }
@@ -139,6 +142,19 @@
         }
       }
     },
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "episode_start": {
+      "description": "server → client, a game's key is fixed. Sent before the game boots, ahead of its first decision.",
+      "type": "object",
+      "required": ["type", "episode", "number", "commit"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "episode_start"},
+        "episode": {"$ref": "#/$defs/episode"},
+        "number": {"type": "integer", "minimum": 1},
+        "commit": {"$ref": "#/$defs/digest", "description": "SHA-256 of the episode key that episode_end reveals."}
+      }
+    },
     "episode_end": {
       "description": "server → client, a game is over.",
       "type": "object",
@@ -151,12 +167,13 @@
         "outcome": {"enum": ["win", "loss", "void"], "description": "void: the referee failed, not the bot."},
         "floor": {"type": "integer", "minimum": 0},
         "act": {"type": "integer", "minimum": 0},
+        "fault": {"type": "string", "description": "Why a void game could not go on: a server fault, never the bot's."},
         "reveal": {
           "type": "object",
           "required": ["episode_key", "transcript"],
           "additionalProperties": false,
           "properties": {
-            "episode_key": {"type": "string"},
+            "episode_key": {"$ref": "#/$defs/digest", "description": "The key, as hex. Its SHA-256 is episode_start's commit."},
             "transcript": {"type": "array", "items": {"type": "object"}}
           }
         }

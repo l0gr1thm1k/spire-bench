@@ -5,6 +5,12 @@ vendored at ``vendor/spire-mentor``. It runs the game's own ``sts2.dll`` with
 Godot stubbed out. One command goes in as a JSON line on stdin, and one JSON
 line comes back on stdout. Its log output goes to stderr.
 
+The gateway plays on the keyed build of the harness (``harness/``, built
+into ``build/keyed/<version>`` by ``harness/build_keyed.sh``): every draw the
+game makes comes from ChaCha20 under the episode key, which ``start_run``
+passes and the game never sees. The upstream build, which takes a seed
+string, is kept for measuring the game itself (``start_seeded_run``).
+
 This module is the worker side of contract A in the build plan. It does no
 filtering: the raw state it returns still carries hidden fields (the ``rng``
 block, the ordered draw pile), and the gateway's allow-list must remove them
@@ -50,7 +56,31 @@ def _world_error_matcher() -> Callable[[str], bool]:
 
 
 def harness_dll(game_version: str = DEFAULT_GAME_VERSION, config: str = "Release") -> Path:
+    """The upstream harness, which takes a seed string."""
     return PYCLI / "src" / "Sts2Headless" / "bin" / game_version / config / "net9.0" / "Sts2Headless.dll"
+
+
+def keyed_dir(game_version: str = DEFAULT_GAME_VERSION, plant: bool = False, trace: bool = False,
+              deep: bool = False) -> Path:
+    """The keyed harness; ``plant`` is the test build that makes one unkeyed draw, to show it is refused,
+    ``trace`` the fuzzer's build, which logs every stream it opens, and ``deep`` the traced fuzz build whose
+    player never drops below 1 HP. None of them is ever the gateway's."""
+    if plant + trace + deep > 1:
+        raise ValueError("the plant, trace and deep builds are separate")
+    name = "keyed-plant" if plant else "keyed-trace" if trace else "fuzz-deep" if deep else "keyed"
+    return REPO / "build" / name / game_version
+
+
+def seeded_deep_dll(game_version: str = DEFAULT_GAME_VERSION) -> Path:
+    """The upstream harness with only the fuzz-deep build's 1 HP floor, for the deep fuzz's leak check."""
+    return REPO / "build" / "fuzz-deep-seeded" / game_version / "Sts2Headless.dll"
+
+
+def worker_dll(game_version: str = DEFAULT_GAME_VERSION, keyed: bool = True, plant: bool = False,
+               trace: bool = False, deep: bool = False) -> Path:
+    if keyed:
+        return keyed_dir(game_version, plant, trace, deep) / "Sts2Headless.dll"
+    return seeded_deep_dll(game_version) if deep else harness_dll(game_version)
 
 
 def _sha256(path: Path) -> str | None:
@@ -83,19 +113,21 @@ def _harness_dirty() -> bool | None:
     return None if out is None or out.returncode > 1 else out.returncode == 1
 
 
-def engine_identity(game_version: str = DEFAULT_GAME_VERSION, config: str = "Release") -> dict[str, Any]:
+def engine_identity(game_version: str = DEFAULT_GAME_VERSION) -> dict[str, Any]:
     """What a game ran on, so a transcript can still be checked after the harness changes.
 
     The game DLL is hashed as shipped (``sts2.dll.original``, which the setup
-    script keeps) and as patched for headless play (``sts2.dll``). A file
-    that isn't there is recorded as None, never as another file's hash.
+    script keeps) and as the keyed build runs it (headless and keyed). The
+    keyed harness and its key schedule (``KeyedRng.dll``) are hashed too. A
+    file that isn't there is recorded as None, never as another file's hash.
     """
-    lib = PYCLI / "lib" / game_version
+    keyed = keyed_dir(game_version)
     return {
         "build_id": game_version,
-        "game_dll_sha256": _sha256(lib / "sts2.dll.original"),
-        "patched_game_dll_sha256": _sha256(lib / "sts2.dll"),
-        "harness_dll_sha256": _sha256(harness_dll(game_version, config)),
+        "game_dll_sha256": _sha256(PYCLI / "lib" / game_version / "sts2.dll.original"),
+        "patched_game_dll_sha256": _sha256(keyed / "lib" / "sts2.dll"),
+        "harness_dll_sha256": _sha256(keyed / "Sts2Headless.dll"),
+        "keyed_rng_dll_sha256": _sha256(keyed / "lib" / "KeyedRng.dll"),
         "harness_commit": _harness_commit(),
         "harness_dirty": _harness_dirty(),
     }
@@ -132,12 +164,19 @@ class CpuTimes:
 
 
 class HeadlessGame:
-    """One harness process. It plays one run at a time and can start another."""
+    """One harness process, which plays one game.
 
-    def __init__(self, game_version: str = DEFAULT_GAME_VERSION, config: str = "Release",
-                 stderr_path: Path | None = None, timeout_s: float = 60.0) -> None:
-        self.timeout_s, self.timed_out = timeout_s, False
-        dll = harness_dll(game_version, config)
+    ``keyed`` (the default) runs the keyed build, which takes an episode key;
+    otherwise the upstream build, which takes a seed string. ``plant`` runs the
+    keyed test build that makes one unkeyed draw; ``trace`` the fuzzer's build;
+    ``deep`` the fuzz builds whose player never drops below 1 HP.
+    """
+
+    def __init__(self, game_version: str = DEFAULT_GAME_VERSION, keyed: bool = True, plant: bool = False,
+                 stderr_path: Path | None = None, timeout_s: float = 60.0, trace: bool = False,
+                 deep: bool = False) -> None:
+        self.timeout_s, self.timed_out, self.keyed = timeout_s, False, keyed
+        dll = worker_dll(game_version, keyed, plant, trace, deep)
         if not dll.exists():
             raise FileNotFoundError(f"harness not built: {dll}")
         env = dict(os.environ)
@@ -233,7 +272,21 @@ class HeadlessGame:
         self.proc.stdin.flush()
         return self._read()
 
-    def start_run(self, character: str, ascension: int, seed: str) -> dict[str, Any]:
+    def start_run(self, character: str, ascension: int, key: bytes) -> dict[str, Any]:
+        """Start the game the episode key deals. The key goes to the keyed RNG; the game sees a public seed."""
+        if not self.keyed:
+            raise HarnessError("start_run takes a key, which only the keyed harness can play; use start_seeded_run")
+        if len(key) != 32:
+            raise ValueError(f"an episode key is 32 bytes, not {len(key)}")
+        return self._start(character, ascension, key.hex())
+
+    def start_seeded_run(self, character: str, ascension: int, seed: str) -> dict[str, Any]:
+        """Start the upstream harness on a seed string: for measuring the game, never for a benchmark game."""
+        if self.keyed:
+            raise HarnessError("the keyed harness refuses seed strings; open HeadlessGame(keyed=False)")
+        return self._start(character, ascension, seed)
+
+    def _start(self, character: str, ascension: int, seed: str) -> dict[str, Any]:
         # act1 "roll": the seed picks act 1 as the game does. Without it the
         # harness always starts in Overgrowth (Thomas Friedel's review of PR 1).
         # interactive_potion_swap: a potion reward on a full belt is a decision,
@@ -297,7 +350,7 @@ Choice = tuple[str, dict[str, Any]]
 class Game(Protocol):
     """What the gateway needs from a game: HeadlessGame, or a scripted stand-in in tests."""
 
-    def start_run(self, character: str, ascension: int, seed: str) -> dict[str, Any]: ...
+    def start_run(self, character: str, ascension: int, key: bytes) -> dict[str, Any]: ...
     def act(self, verb: str, args: dict[str, Any]) -> dict[str, Any]: ...
     def combat_actions(self) -> list[Choice]: ...
     def close(self) -> None: ...

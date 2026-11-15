@@ -44,7 +44,9 @@ discarded outside combat. See [Fidelity](docs/PLAN.md#fidelity-does-the-harness-
 
 This repository contains no game files and never will. The headless harness is
 built from the DLLs in your own Steam install (see
-`vendor/spire-mentor/sts2-pycli/setup.sh`). This project is not affiliated
+`vendor/spire-mentor/sts2-pycli/setup.sh`), then patched so the episode key
+decides every draw: `bash harness/build_keyed.sh v0.111.0` (it needs the .NET
+SDK and writes `build/keyed/v0.111.0/`; v0.107.1 also builds). This project is not affiliated
 with Mega Crit.
 
 ## Credits

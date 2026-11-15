@@ -8,14 +8,15 @@ from spirebench.worker import headless
 
 
 def test_a_missing_shipped_dll_is_recorded_as_none_not_as_the_patched_one(tmp_path, monkeypatch):
-    lib = tmp_path / "lib" / "v0.111.0"
+    lib = tmp_path / "build" / "keyed" / "v0.111.0" / "lib"
     lib.mkdir(parents=True)
     (lib / "sts2.dll").write_bytes(b"patched")
-    monkeypatch.setattr(headless, "PYCLI", tmp_path)
+    monkeypatch.setattr(headless, "PYCLI", tmp_path / "pycli")
+    monkeypatch.setattr(headless, "REPO", tmp_path)
     engine = headless.engine_identity("v0.111.0")
     assert engine["game_dll_sha256"] is None
     assert len(engine["patched_game_dll_sha256"]) == 64
-    assert engine["harness_dll_sha256"] is None
+    assert engine["harness_dll_sha256"] is None and engine["keyed_rng_dll_sha256"] is None
 
 
 def test_the_engine_says_whether_the_harness_checkout_is_edited(monkeypatch):

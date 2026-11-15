@@ -48,7 +48,7 @@ until acts 2 and 3 are measured. See [M0.md](M0.md).
 | Decision types | have | `map_select`, `combat_play`, `card_reward`, `card_select`, `bundle_select`, `event_choice`, `rest_site`, `shop`, `potion_swap`, `game_over`, and `unknown` for a screen the harness doesn't recognize. cygn's referee is built on this same harness. |
 | Legal actions | have | A `legal_actions` command lists combat moves. Other screens list their options in the state, and `spirebench.worker.headless.legal_choices` turns them into moves. |
 | Fight starts (Track 2) | have | `set_player` and `enter_room` build a fight from a given deck, relics and encounter. Only the referee may call them. |
-| Keyed dice | coming | The public harness uses the game's own seeded generator. Thomas has HMAC-keyed streams with the unkeyed-draw guard on a private branch; it works on v0.107.1, and the v0.111.0 generator is still a stub. |
+| Keyed dice | have (v0.107.1) | `harness/build_keyed.sh` patches the pinned harness: every generator draws from a keyed ChaCha20 stream, other randomness raises, and seed strings are refused. Verified on v0.107.1 only; v0.111.0 is not yet built or checked. See [M3.md](M3.md). |
 | Player-visible view | coming | The raw state includes the draw pile in order and an `rng` block with the run seed and stream counters, both needed for parity testing. Thomas's branch renders a player-visible view inside the host, from an allow-list. |
 | Locked command set | coming | Debug commands (`set_draw_order`, `rng_probe`, `dump_*`, `get_trace`, `load_save`, ...) must be unreachable by a bot. On Thomas's branch; bots never talk to the worker directly in any case. |
 | Crystal Sphere | coming | The public harness completes the minigame automatically. A decision on Thomas's branch, as in cygn's referee. |
@@ -75,7 +75,8 @@ without breaking their code, as long as each contract holds.
 
 - **A. Worker ↔ gateway.** JSON lines on the worker's stdin and stdout, the
   harness's native interface. A pipe means the worker needs no network at all.
-  The gateway sends only `start {episode_key, character, ascension}`,
+  The gateway sends only `start {key, character, ascension}` (the 32-byte
+  episode key; the keyed harness refuses a seed string),
   `action {...}` and `close`.
 - **B. Gateway ↔ library.** A versioned JSON protocol over WebSocket, with
   compression on. A JSON Schema file in `schema/` is the source of truth. This
@@ -126,12 +127,13 @@ client.run(
 | Message | Direction | Fields |
 |---|---|---|
 | `hello` | client → server | `token`, `client_version`, `schema_versions` |
-| `welcome` | server → client | `build_id`, `schema_version`, `limits` (decision deadline, max in flight, daily cap) |
+| `welcome` | server → client | `build_id`, `schema_version`, `season`, `season_commitment` (SHA-256 of the season secret), `limits` (decision deadline, max in flight, daily cap) |
 | `start` | client → server | `agent_version`, `character`, `ascension`, `key` (practice or scored), `count` |
+| `episode_start` | server → client | `episode`, `number`, `commit` (SHA-256 of the episode key), sent before the game boots |
 | `decisions` | server → client | list of `{episode, seq, decision_type, observation, legal_actions, deadline_ms}` |
 | `actions` | client → server | list of `{episode, seq, action_id}` |
 | `errors` | server → client | list of `{episode, seq, code}`, where `code` is one of `illegal_action`, `bad_request`, `not_available`, `rejected`, `internal` |
-| `episode_end` | server → client | `episode`, `number`, `outcome`, `floor`, `act`, and for the owner `reveal {episode_key, transcript}` |
+| `episode_end` | server → client | `episode`, `number`, `outcome`, `floor`, `act`, `fault` on a void game, and for the owner `reveal {episode_key, transcript}`; the library checks the key against `commit` |
 
 `decisions`, `actions` and `errors` all carry lists, so batching is built into
 the protocol. `number` is assigned by the server when an episode starts, and
@@ -358,20 +360,24 @@ schema, and a permuted draw pile gives a byte-identical observation.
 
 ### M3: keyed dice and exact replay
 
-Take the HMAC-keyed streams and the unkeyed-draw guard from Thomas's branch
-once it is public and works on the season's build, and add a replay tool.
+The detailed plan is [M3.md](M3.md). Revealing the seed is not the only
+problem. On v0.107.1 the game reduces any seed to 32 bits, and a search of all
+2^32 takes under two seconds. So hiding the seed string can't hide the dice,
+and the keyed streams have to replace how the game derives its seeds.
 
-Episode keys are one-way: derived from a server secret, the agent version and
-the episode number, and never reissued. That makes revealing a key to its
-owner at `episode_end` safe. A game whose worker crashes is restored by
-replaying the same actions under the same key, never by letting the bot choose
-again.
+Episode keys are 256-bit HMACs of a season secret, the agent version and the
+episode number, and are never reissued. They are committed at `start` and
+revealed to the owner at `episode_end`. Each stream draws from ChaCha20 under
+its own key, and an unkeyed draw voids the game as a server fault. A crashed
+worker is restored by replaying the same moves under the same key. Anything a
+bot causes, such as a disconnect or a missed deadline, is a loss, never a
+void. Take Thomas's keyed streams if they meet this. If not, write them here.
 
 Done when a transcript replays to the identical game on a different machine,
 including games that reach acts 2 and 3; the same transcript with one action
 changed diverges; a planted unkeyed draw voids its episode; the keyed game
 matches the real one in distribution (shuffle uniformity, card rarity, intent
-frequencies); and the M2 suite still passes.
+frequencies); and the M2 suite still passes. [M3.md](M3.md) lists the rest.
 
 ### M4: real bots through adapters
 
@@ -402,8 +408,8 @@ size.
 Done when the page shows the random bot and floor-climber, and rerunning the
 scoring script produces identical tables.
 
-After M5, the roadmap in the proposal continues: commit and reveal plus the
-verifier, then cloud hosting, then a closed beta with outside bots, then
+After M5, the roadmap in the proposal continues: the public verifier (commit
+and reveal moved into M3), then cloud hosting, then a closed beta with outside bots, then
 season 0. Track 2 (fight starts) can start any time after M3, since the
 harness already builds fight starts.
 

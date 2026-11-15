@@ -9,3 +9,6 @@ data/
 transcripts/
 *.sqlite
 .idea/
+build/
+bin/
+obj/

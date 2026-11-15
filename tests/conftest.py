@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -11,8 +12,18 @@ from typing import Any
 
 import pytest
 
+from spirebench.gateway.keys import derive_key
 from spirebench.gateway.server import Gateway, Settings
 from spirebench.gateway.store import Store
+from spirebench.worker.headless import DEFAULT_GAME_VERSION
+
+SEASON = "test"
+SECRET = bytes(range(32))  # a fixed test secret, so tests can rederive keys
+GAME_VERSION = os.environ.get("SPIREBENCH_GAME_VERSION", DEFAULT_GAME_VERSION)  # the build the real-game tests run
+
+
+def key_of(agent_version: str, number: int) -> bytes:
+    return derive_key(SECRET, "practice", SEASON, agent_version, number)
 
 
 @contextmanager
@@ -48,7 +59,7 @@ def gateway(tmp_path: Path):
 
     def make(factory: Callable[[], Any], **settings: Any) -> tuple[str, Store]:
         store = Store(tmp_path / "gateway.sqlite", tmp_path / "transcripts")
-        cm = _running(store, factory, Settings(**settings))
+        cm = _running(store, factory, Settings(**{"season": SEASON, "season_secret": SECRET, **settings}))
         stack.append(cm)
         return cm.__enter__(), store
 

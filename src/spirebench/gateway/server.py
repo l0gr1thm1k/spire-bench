@@ -4,17 +4,18 @@ One connection is one client. It says hello, starts episodes, and answers
 decisions with actions. Each episode owns one harness process; every call
 into it runs in a thread so the event loop stays free.
 
-M1 scope: one practice key with the harness's own seeded dice, a token check
-against a fixed set, and the deadline sent but not enforced. Deadlines,
-reconnect and the observation allow-list are M2.
+Each game's key is an HMAC of the season secret, fixed and committed to
+(``episode_start``) before the game boots, and revealed at its end. M1/M2
+scope otherwise: one practice key, a token check against a fixed set, and the
+deadline sent but not enforced. The key itself reaches the keyed harness,
+which draws every stream from it; nothing is scored until the distribution
+checks (M3 slice 4) and the season machinery (M5) land.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import secrets
-import string
 import uuid
 from collections import Counter
 from collections.abc import Callable, Sequence
@@ -25,18 +26,13 @@ from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from spirebench.gateway.episode import Episode, Game, close_game
+from spirebench.gateway.keys import SECRET_BYTES, derive_key
 from spirebench.gateway.store import Store
 from spirebench.protocol import (CHARACTERS, MAX_ASCENSION, MAX_MESSAGE_BYTES, PRACTICE_KEY, PROTOCOL_VERSION,
-                                 SCHEMA_VERSION, Message, decode, encode)
+                                 SCHEMA_VERSION, Message, commitment, decode, encode)
 from spirebench.worker.headless import DEFAULT_GAME_VERSION
 
 log = logging.getLogger(__name__)
-
-SEED_ALPHABET = string.ascii_uppercase + string.digits
-
-
-def new_seed() -> str:
-    return "".join(secrets.choice(SEED_ALPHABET) for _ in range(12))
 
 
 def _is_int(value: Any) -> TypeGuard[int]:
@@ -45,6 +41,8 @@ def _is_int(value: Any) -> TypeGuard[int]:
 
 @dataclass
 class Settings:
+    season: str
+    season_secret: bytes = field(repr=False)  # every key derives from it; published only when the season ends
     build_id: str = DEFAULT_GAME_VERSION
     tokens: dict[str, str] = field(default_factory=lambda: {"dev": "dev"})  # token -> owner
     decision_deadline_ms: int = 5000
@@ -74,13 +72,12 @@ class _Connection:
 
 
 class Gateway:
-    def __init__(self, store: Store, game_factory: Callable[[], Game], settings: Settings | None = None,
-                 seed_fn: Callable[[], str] = new_seed) -> None:
-        self.store, self.game_factory = store, game_factory
-        self.settings = settings or Settings()
-        self.seed_fn = seed_fn
-        self._numbers: dict[str, int] = {}
-        self._numbering = asyncio.Lock()
+    def __init__(self, store: Store, game_factory: Callable[[], Game], settings: Settings) -> None:
+        if len(settings.season_secret) != SECRET_BYTES:
+            raise ValueError(f"a season secret is {SECRET_BYTES} bytes, not {len(settings.season_secret)}")
+        self.store, self.game_factory, self.settings = store, game_factory, settings
+        self.season_commitment = commitment(settings.season_secret)
+        log.info("season %s, commitment %s", settings.season, self.season_commitment)
         # Game slots, reserved when a start is admitted and released when its
         # game ends or fails to boot. Counted per owner, not per connection,
         # so opening more connections doesn't buy more harness processes.
@@ -122,6 +119,7 @@ class Gateway:
         cfg = self.settings
         await conn.send({"type": "welcome", "protocol_version": PROTOCOL_VERSION, "build_id": cfg.build_id,
                          "schema_version": SCHEMA_VERSION,
+                         "season": cfg.season, "season_commitment": self.season_commitment,
                          "limits": {"decision_deadline_ms": cfg.decision_deadline_ms,
                                     "max_in_flight": cfg.max_in_flight}})
         return True
@@ -178,13 +176,6 @@ class Gateway:
                 log.error("gateway failed on one operation", exc_info=result)
                 await conn.error("internal", str(episode) if episode else None)
 
-    async def _number(self, agent: str) -> int:
-        async with self._numbering:  # one read of the store per agent version, off the loop
-            if agent not in self._numbers:
-                self._numbers[agent] = await asyncio.to_thread(self.store.next_number, agent) - 1
-            self._numbers[agent] += 1
-            return self._numbers[agent]
-
     async def _run_new(self, conn: _Connection, agent: str, character: str, ascension: int) -> None:
         episode_id = f"e-{uuid.uuid4().hex[:12]}"
         try:
@@ -197,9 +188,12 @@ class Gateway:
         except BaseException:
             self._slots[conn.owner] -= 1
             raise
+        cfg = self.settings
         try:
-            ep = Episode(episode_id, await self._number(agent), character, ascension, self.seed_fn(), game)
-            await asyncio.to_thread(self.store.begin, ep, agent, self.settings.build_id)
+            number = await asyncio.to_thread(self.store.begin, episode_id, cfg.season, agent, character, ascension,
+                                             cfg.build_id)
+            key = derive_key(cfg.season_secret, PRACTICE_KEY, cfg.season, agent, number)
+            ep = Episode(episode_id, cfg.season, agent, number, character, ascension, key, game, self.game_factory)
         except BaseException as exc:
             # Not registered yet, so nothing else would close this harness or give its slot back.
             self._slots[conn.owner] -= 1
@@ -211,6 +205,8 @@ class Gateway:
             return
         conn.episodes[episode_id], conn.locks[episode_id] = ep, asyncio.Lock()
         async with conn.locks[episode_id]:
+            # The commit goes out before the game boots, so the key is fixed before anyone sees a draw.
+            await conn.send({"type": "episode_start", "episode": episode_id, "number": number, "commit": ep.commit})
             await asyncio.to_thread(ep.start)
             await self._next(conn, ep)
 
@@ -243,7 +239,7 @@ class Gateway:
                 decision = await asyncio.to_thread(ep.decision, self.settings.decision_deadline_ms)
             except Exception:
                 log.exception("could not build the decision for %s", ep.episode_id)
-                ep.outcome = "void"  # ended, not left open with the client waiting on it
+                ep.void("decision_error")  # ended, not left open with the client waiting on it
             else:
                 await conn.send({"type": "decisions", "decisions": [decision]})
                 return
@@ -265,9 +261,12 @@ class Gateway:
 
     async def _end(self, conn: _Connection, ep: Episode) -> None:
         await self._finalize(conn, ep)
-        await conn.send({"type": "episode_end", "episode": ep.episode_id, "number": ep.number,
-                         "outcome": ep.outcome, "floor": ep.floor, "act": ep.act,
-                         "reveal": {"episode_key": ep.seed, "transcript": ep.transcript}})
+        end: Message = {"type": "episode_end", "episode": ep.episode_id, "number": ep.number,
+                        "outcome": ep.outcome, "floor": ep.floor, "act": ep.act,
+                        "reveal": {"episode_key": ep.key.hex(), "transcript": ep.transcript}}
+        if ep.fault is not None:
+            end["fault"] = ep.fault
+        await conn.send(end)
 
     async def _abandon(self, conn: _Connection) -> None:
         """A client that leaves loses its open games, so quitting can't protect a streak."""
