@@ -54,8 +54,9 @@ def _world_error_matcher() -> Callable[[str], bool]:
 
 
 def harness_dll(game_version: str = DEFAULT_GAME_VERSION, config: str = "Release") -> Path:
-    """The upstream harness, which takes a seed string."""
-    return PYCLI / "src" / "Sts2Headless" / "bin" / game_version / config / "net9.0" / "Sts2Headless.dll"
+    """The patched, unkeyed harness (harness/build_harness.sh), which takes a seed string."""
+    return (REPO / "build" / "harness-src" / game_version / "src" / "Sts2Headless" / "bin" / game_version / config
+            / "net9.0" / "Sts2Headless.dll")
 
 
 def keyed_dir(game_version: str = DEFAULT_GAME_VERSION, plant: bool = False, trace: bool = False,
@@ -287,10 +288,8 @@ class HeadlessGame:
     def _start(self, character: str, ascension: int, seed: str) -> dict[str, Any]:
         # act1 "roll": the seed picks act 1 as the game does. Without it the
         # harness always starts in Overgrowth (Thomas Friedel's review of PR 1).
-        # interactive_potion_swap: a potion reward on a full belt is a decision,
-        # as in the real game, rather than being dropped (one of cygn's fixes).
         return self.send({"cmd": "start_run", "character": character, "ascension": ascension,
-                          "seed": seed, "act1": "roll", "interactive_potion_swap": True})
+                          "seed": seed, "act1": "roll"})
 
     def act(self, verb: str, args: dict[str, Any]) -> dict[str, Any]:
         cmd: dict[str, Any] = {"cmd": "action", "action": verb}
@@ -418,10 +417,6 @@ def _indices(picked: list[int]) -> str:
     return ",".join(str(i) for i in sorted(picked))
 
 
-def _potion_swap(view: dict[str, Any]) -> list[Choice]:
-    return [("potion_swap", {"discard_slot": o.get("discard_slot")}) for o in view.get("options") or []]
-
-
 def _bundle(view: dict[str, Any]) -> list[Choice]:
     return [("select_bundle", {"bundle_index": b["index"]}) for b in view.get("bundles") or []]
 
@@ -448,10 +443,41 @@ def _shop(view: dict[str, Any]) -> list[Choice]:
     return out
 
 
+def _rewards(view: dict[str, Any]) -> list[Choice]:
+    # A potion on a full belt stays on the screen until a slot is free (PotionReward.OnSelect).
+    full = _belt_is_full(view.get("player") or {})
+    out = [("take_reward", {"reward_index": r["index"]}) for r in view.get("rewards") or []
+           if not (full and r.get("kind") == "potion")]
+    if view.get("can_leave"):
+        out.append(("leave_rewards", {}))
+    return out
+
+
+def _treasure(view: dict[str, Any]) -> list[Choice]:
+    out: list[Choice] = [] if view.get("chest_opened") else [("open_chest", {})]
+    out.extend(("take_relic", {"relic_index": r["index"]}) for r in view.get("relics") or [])
+    out.append(("leave_room", {}))
+    return out
+
+
+def _belt(view: dict[str, Any]) -> list[Choice]:
+    """Drinks and discards out of combat, as the harness marks each potion (no enemy to aim at here)."""
+    out: list[Choice] = []
+    for p in (view.get("player") or {}).get("potions") or []:
+        if p.get("can_use"):
+            out.append(("use_potion", {"potion_index": p["index"]}))
+        if p.get("can_discard"):
+            out.append(("discard_potion", {"potion_index": p["index"]}))
+    return out
+
+
 _SCREENS = {
     "event_choice": _options, "rest_site": _options, "map_select": _map, "card_reward": _card_reward,
-    "card_select": _card_select, "potion_swap": _potion_swap, "bundle_select": _bundle, "shop": _shop,
+    "card_select": _card_select, "bundle_select": _bundle, "shop": _shop, "rewards": _rewards,
+    "treasure": _treasure,
 }
+# The belt is open on these screens; the others are a choice the game is waiting on mid-action.
+_BELT_SCREENS = {"event_choice", "rest_site", "map_select", "shop", "rewards", "treasure"}
 
 
 class UnknownScreen(RuntimeError):
@@ -476,7 +502,7 @@ def legal_choices(game: Game, view: dict[str, Any]) -> list[Choice]:
     screen = _SCREENS.get(dec)
     if screen is None:
         raise UnknownScreen(f"no moves are known for the {dec!r} screen (room {view.get('room_type')!r})")
-    return screen(view)
+    return screen(view) + (_belt(view) if dec in _BELT_SCREENS else [])
 
 
 def take(game: Game, view: dict[str, Any], choice: Choice) -> tuple[dict[str, Any], Choice | None]:

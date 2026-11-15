@@ -22,10 +22,11 @@ Client("ws://127.0.0.1:8765", token="dev").run(
 
 **Caveat: how faithful the harness is, is still being measured.** It runs the
 game's own code, headless, with the game's test mode on. Replaying recorded
-human runs through it, 146 of 235 runs at A5 and above stay in sync to the end;
-the rest are not traced yet, and no fault in the harness is confirmed so far.
-Known gaps: rewards are taken automatically, and potions can't be used or
-discarded outside combat. See [Fidelity](docs/PLAN.md#fidelity-does-the-harness-play-the-real-game).
+human runs through the upstream harness, 146 of 235 runs at A5 and above stayed in sync
+to the end; the rest are not traced yet, and no fault in the harness is confirmed so far.
+That figure predates the patched screens here (the rewards screen, potions outside
+combat, the map, one-card selections; see [docs/FIDELITY.md](docs/FIDELITY.md)) and has
+not been re-measured on them. See [Fidelity](docs/PLAN.md#fidelity-does-the-harness-play-the-real-game).
 
 - Proposal: [A Shared Benchmark for Slay the Spire 2 Bots](https://docs.google.com/document/d/17AXtsWNrIExi4oN7_xp_76xpGA9BN0kVhv9Z0MxMuCg/edit)
 - Build plan: [docs/PLAN.md](docs/PLAN.md)
@@ -45,8 +46,9 @@ discarded outside combat. See [Fidelity](docs/PLAN.md#fidelity-does-the-harness-
 This repository contains no game files and never will. The headless harness is
 built from the DLLs in your own Steam install (see
 `vendor/spire-mentor/sts2-pycli/setup.sh`), then patched so the episode key
-decides every draw: `bash harness/build_keyed.sh v0.111.0` (it needs the .NET
-SDK and writes `build/keyed/v0.111.0/`; v0.107.1 also builds). This project is not affiliated
+decides every draw: `bash harness/build_harness.sh v0.111.0` applies
+`harness/patches/` and builds it, then `bash harness/build_keyed.sh v0.111.0` keys it
+(both need the .NET SDK; the keyed build lands in `build/keyed/v0.111.0/`; v0.107.1 also builds). This project is not affiliated
 with Mega Crit.
 
 ## Credits

@@ -45,16 +45,18 @@ until acts 2 and 3 are measured. See [M0.md](M0.md).
 | Piece | Status | Notes |
 |---|---|---|
 | Real game logic, headless | have | The game's own code, with Godot replaced by stubs. |
-| Decision types | have | `map_select`, `combat_play`, `card_reward`, `card_select`, `bundle_select`, `event_choice`, `rest_site`, `shop`, `potion_swap`, `game_over`, and `unknown` for a screen the harness doesn't recognize. cygn's referee is built on this same harness. |
+| Decision types | have | `map_select`, `combat_play`, `card_reward`, `card_select`, `bundle_select`, `event_choice`, `rest_site`, `shop`, `rewards`, `treasure`, `game_over`. A screen the harness does not recognize voids the game with a fault naming it. cygn's referee is built on this same harness. |
 | Legal actions | have | A `legal_actions` command lists combat moves. Other screens list their options in the state, and `spirebench.worker.headless.legal_choices` turns them into moves. |
 | Fight starts (Track 2) | have | `set_player` and `enter_room` build a fight from a given deck, relics and encounter. Only the referee may call them. |
-| Keyed dice | have (v0.107.1) | `harness/build_keyed.sh` patches the pinned harness: every generator draws from a keyed ChaCha20 stream, other randomness raises, and seed strings are refused. Verified on v0.107.1 only; v0.111.0 is not yet built or checked. See [M3.md](M3.md). |
+| Keyed dice | have | `harness/build_keyed.sh` patches the pinned harness: every generator draws from a keyed ChaCha20 stream, other randomness raises, and seed strings are refused. Verified on v0.107.1 and v0.111.0. See [M3.md](M3.md). |
 | Player-visible view | coming | The raw state includes the draw pile in order and an `rng` block with the run seed and stream counters, both needed for parity testing. Thomas's branch renders a player-visible view inside the host, from an allow-list. |
 | Locked command set | coming | Debug commands (`set_draw_order`, `rng_probe`, `dump_*`, `get_trace`, `load_save`, ...) must be unreachable by a bot. On Thomas's branch; bots never talk to the worker directly in any case. |
 | Crystal Sphere | coming | The public harness completes the minigame automatically. A decision on Thomas's branch, as in cygn's referee. |
 | Legal actions on every screen, fixed error codes | coming | On Thomas's branch. Until then `legal_choices` reads them off each screen. |
-| Rewards | gap | The host takes gold, relic and potion rewards automatically. |
-| Potions outside combat | gap | The host can't use or discard a potion outside combat yet. |
+| Rewards | have | The room's own rewards screen: the player takes each reward or leaves it, and opens a chest or not. See [FIDELITY.md](FIDELITY.md). |
+| Map | have | Every `map_select` carries the current act's map: node icons, edges, bosses, position, path walked. |
+| Selections | have | A `card_select` is made one card at a time, so no selection is capped. Cards everywhere keep enchantment, affliction and cost. |
+| Potions outside combat | have | On every screen the game opens the belt, from its own checks. A potion whose check reads the scene (Foul Potion at a merchant) reads as not usable. |
 | Swallowed exceptions | gap | The host reports some game exceptions only on stderr. `HeadlessGame` counts them on every run. |
 | A run per process | limit | A second `start_run` in one process fails, and the game is built on singletons, so a reset between runs isn't realistic. A pool of pre-booted processes hides the startup latency, not its CPU. |
 
@@ -196,7 +198,7 @@ Visibility rules, beyond the hidden fields:
 
 - An enemy's intent is hidden whenever an effect hides it in the game.
 - The second act-3 boss isn't shown before the first one falls.
-- Only the current act's map is sent.
+- Only the current act's map is sent, on `map_select`, with `?` nodes as `Unknown`.
 - Shop, event and reward contents are sent only while that screen is open.
 - Event options carry their text and visible numbers, not a resolved preview
   of the outcome.
@@ -422,7 +424,9 @@ it differs. He replays recorded human runs from SpireCodex into the host: of
 300 runs on v0.111.0, 235 were at A5 or above, and 146 of those stay in sync to
 the end of the log. The other 89 aren't traced yet. No host fault is confirmed
 so far, and several mismatches turned out to be faults in the recorder or the
-replayer. Known host gaps are listed in the table above.
+replayer. Those replays ran on the upstream harness, before the patched screens in
+[FIDELITY.md](FIDELITY.md); the corpus and replayer are not public, so they can't be
+re-run here. Known host gaps are listed in the table above.
 
 This runs alongside the milestones rather than inside one, and the README
 carries a caveat until the untraced runs are explained. The same replays will

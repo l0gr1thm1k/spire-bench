@@ -13,7 +13,7 @@ import pytest
 from conftest import GAME_VERSION
 
 from spirebench.gateway.replay_core import view_digest
-from spirebench.worker.headless import HarnessError, HeadlessGame, keyed_dir, legal_choices
+from spirebench.worker.headless import HarnessError, HeadlessGame, keyed_dir, legal_choices, take
 
 pytestmark = pytest.mark.skipif(not (keyed_dir(GAME_VERSION) / "Sts2Headless.dll").exists(),
                                 reason="keyed harness not built here")
@@ -75,8 +75,8 @@ def test_a_command_the_gateway_never_sends_is_refused(cmd):
         view = game.start_run("Ironclad", 10, KEY)
         reply = game.send(cmd)
         assert reply["type"] == "error" and "refused by the keyed harness" in reply["message"], reply
-        verb, args = legal_choices(game, view)[0]
-        assert game.act(verb, args)["type"] != "error"  # the game plays on
+        after, _ = take(game, view, legal_choices(game, view)[0])
+        assert after["type"] != "error"  # the game plays on
 
 
 def test_a_debug_command_is_refused_before_the_key_too():

@@ -8,7 +8,7 @@ per measure, so the samples are independent:
 
   shuffle             where Bash (the one marked card) lands in the first
                       combat's draw order, by deck size
-  rarity              the rarities on the first card reward screen
+  rarity              the rarities of the first card reward offered
   intent ENC round R  the moves the enemies of encounter ENC (its enemies'
                       names) intend in round R (1 or 2), the first time the
                       game meets ENC
@@ -61,6 +61,13 @@ def first_combat_views(views: list[View]) -> dict[tuple[int, int], View]:
     return firsts
 
 
+def card_offers(view: View) -> list[list[View]]:
+    """The card rewards a view shows: listed on the rewards screen, or the one being picked."""
+    if view.get("decision") == "rewards":
+        return [r["cards"] for r in view["rewards"] if r["kind"] == "card"]
+    return [view["cards"]] if view.get("decision") == "card_reward" else []
+
+
 def measures(views: list[View]) -> Sample:
     """One category per measure this game reached."""
     sample: Sample = {}
@@ -71,9 +78,9 @@ def measures(views: list[View]) -> Sample:
         order = [card["id"] for card in opening["hand"] + opening["draw_pile"]]
         if order.count(MARKED) == 1:
             sample["shuffle"] = f"deck {len(order)} position {order.index(MARKED)}"
-    reward = next((v for v in views if v.get("decision") == "card_reward"), None)
-    if reward is not None:
-        sample["rarity"] = ",".join(sorted(card["rarity"] for card in reward["cards"]))
+    offer = next((cards for v in views for cards in card_offers(v)), None)
+    if offer is not None:
+        sample["rarity"] = ",".join(sorted(card["rarity"] for card in offer))
     for floor in floors:
         if (floor, 1) not in rounds:
             continue
