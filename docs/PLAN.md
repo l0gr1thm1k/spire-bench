@@ -358,20 +358,24 @@ schema, and a permuted draw pile gives a byte-identical observation.
 
 ### M3: keyed dice and exact replay
 
-Take the HMAC-keyed streams and the unkeyed-draw guard from Thomas's branch
-once it is public and works on the season's build, and add a replay tool.
+The detailed plan is [M3.md](M3.md). Revealing the seed is not the only
+problem. On v0.107.1 the game reduces any seed to 32 bits, and a search of all
+2^32 takes under two seconds. So hiding the seed string can't hide the dice,
+and the keyed streams have to replace how the game derives its seeds.
 
-Episode keys are one-way: derived from a server secret, the agent version and
-the episode number, and never reissued. That makes revealing a key to its
-owner at `episode_end` safe. A game whose worker crashes is restored by
-replaying the same actions under the same key, never by letting the bot choose
-again.
+Episode keys are 256-bit HMACs of a season secret, the agent version and the
+episode number, and are never reissued. They are committed at `start` and
+revealed to the owner at `episode_end`. Each stream draws from ChaCha20 under
+its own key, and an unkeyed draw voids the game as a server fault. A crashed
+worker is restored by replaying the same moves under the same key. Anything a
+bot causes, such as a disconnect or a missed deadline, is a loss, never a
+void. Take Thomas's keyed streams if they meet this. If not, write them here.
 
 Done when a transcript replays to the identical game on a different machine,
 including games that reach acts 2 and 3; the same transcript with one action
 changed diverges; a planted unkeyed draw voids its episode; the keyed game
 matches the real one in distribution (shuffle uniformity, card rarity, intent
-frequencies); and the M2 suite still passes.
+frequencies); and the M2 suite still passes. [M3.md](M3.md) lists the rest.
 
 ### M4: real bots through adapters
 
@@ -402,8 +406,8 @@ size.
 Done when the page shows the random bot and floor-climber, and rerunning the
 scoring script produces identical tables.
 
-After M5, the roadmap in the proposal continues: commit and reveal plus the
-verifier, then cloud hosting, then a closed beta with outside bots, then
+After M5, the roadmap in the proposal continues: the public verifier (commit
+and reveal moved into M3), then cloud hosting, then a closed beta with outside bots, then
 season 0. Track 2 (fight starts) can start any time after M3, since the
 harness already builds fight starts.
 
