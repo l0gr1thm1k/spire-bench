@@ -8,6 +8,10 @@ A worker that dies mid-game is restored, never handed back to the bot: a new
 worker replays the same key and moves, every observation digest is checked,
 and the failed call is made once more. A game the gateway can't carry on is
 void, with the reason in ``fault``. Nothing the bot does is a fault.
+
+A card picked toward a multi-card selection stays in the gateway until the
+selection is full (``headless.take``): the transcript holds only moves the game
+saw, and ``digest`` is always of the game's own screen.
 """
 
 from __future__ import annotations
@@ -20,7 +24,8 @@ from typing import Any, TypeVar
 from spirebench.gateway.observe import action, legal_actions, observation
 from spirebench.gateway.replay_core import replay, view_digest
 from spirebench.protocol import commitment
-from spirebench.worker.headless import Choice, Game, HarnessError, legal_choices, run_act, run_floor
+from spirebench.worker.headless import (Choice, Game, HarnessError, UnknownScreen, legal_choices, run_act, run_floor,
+                                        take)
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +58,7 @@ class Episode:
     act: int = 0
     restores: int = 0
     transcript: list[dict[str, Any]] = field(default_factory=list)
-    digest: str = ""  # of the view now showing; the transcript's end line keeps the last one
+    digest: str = ""  # of the game's screen now showing; the transcript's end line keeps the last one
     _view: dict[str, Any] = field(default_factory=dict)
     _observation: dict[str, Any] = field(default_factory=dict)
     _choices: list[Choice] = field(default_factory=list)
@@ -83,10 +88,11 @@ class Episode:
             return "bad_request"
         if not 0 <= action_id < len(self._choices):
             return "illegal_action"
-        verb, args = self._choices[action_id]
-        after = self._call(lambda: self.game.act(verb, args))
-        if after is None:
+        choice, shown = self._choices[action_id], self._view
+        taken = self._call(lambda: take(self.game, shown, choice))
+        if taken is None:
             return "internal"
+        after, sent = taken
         if after.get("type") == "error":
             # The move list offered something the game refused. Drop it and ask again.
             self._choices = self._choices[:action_id] + self._choices[action_id + 1:]
@@ -94,8 +100,11 @@ class Episode:
             if not self._choices:
                 self.void("all_refused")
             return "rejected"
+        if sent is None:
+            self._show(after)
+            return None
         self.transcript.append({"seq": self.seq, "decision_type": self._view.get("decision"),
-                                "action": action((verb, args)), "digest": self.digest})
+                                "action": action(sent), "digest": self.digest})
         self._advance(after)
         return None
 
@@ -112,6 +121,10 @@ class Episode:
         """
         try:
             return fn()
+        except UnknownScreen:
+            log.exception("the game of %s reached a screen with no known moves", self.episode_id)
+            self.void("unknown_screen")
+            return None
         except HarnessError:
             log.exception("the worker of %s died; restoring it", self.episode_id)
         except Exception:
@@ -153,12 +166,18 @@ class Episode:
         if view.get("type") == "error":
             self.void("error_screen")
             return
-        self._view, self._observation, self.digest = view, observation(view), view_digest(view)
+        self.digest = view_digest(view)
         self.floor = run_floor(view) or self.floor
         self.act = run_act(view) or self.act
         if view.get("decision") == "game_over":
+            self._view, self._observation = view, observation(view)
             self.outcome = "win" if view.get("victory") else "loss"
             return
+        self._show(view)
+
+    def _show(self, view: dict[str, Any]) -> None:
+        """Put ``view`` before the bot: its observation and the moves it allows."""
+        self._view, self._observation = view, observation(view)
         choices = self._call(lambda: legal_choices(self.game, view))  # combat asks the harness
         if choices is None:
             return

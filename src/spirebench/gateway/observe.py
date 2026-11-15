@@ -2,6 +2,9 @@
 
 M1 removes the fields we know are hidden: every ``rng`` block (run seed and
 stream counters), the order of every draw pile, and each enemy's AI state.
+A draw pile is shown as the game shows it: every card in full (cost, upgrade,
+enchantment, affliction, whatever the harness sends), sorted, with no hint of
+which comes next.
 They are removed at any depth, because the harness nests a whole combat board
 inside a card selection opened mid-fight (``RunSimulator.cs``, ``["combat"] =
 InCombatBoard(player)``). M2 replaces this with an allow-list, so a field the
@@ -10,6 +13,7 @@ harness adds later is dropped until someone decides a bot may see it.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from typing import Any
 
@@ -21,8 +25,14 @@ ENEMY_LISTS = frozenset({"enemies", "dead_enemies"})
 DROPPED_TOP_LEVEL = frozenset({"type", "decision"})
 
 
-def _card_key(card: dict[str, Any]) -> str:
-    return str(card.get("id")) + ("+" if card.get("upgraded") else "")
+DRAW_POSITION = "index"
+
+
+def _draw_pile(cards: list[Any]) -> list[dict[str, Any]]:
+    """Each distinct card once, with its count, in a fixed order that says nothing of the draw order."""
+    counts = Counter(json.dumps({k: v for k, v in _scrub(c).items() if k != DRAW_POSITION}, sort_keys=True)
+                     for c in cards)
+    return [{"card": json.loads(card), "count": n} for card, n in sorted(counts.items())]
 
 
 def _scrub(value: Any, hide: frozenset[str] = HIDDEN_KEYS) -> Any:
@@ -36,7 +46,7 @@ def _scrub(value: Any, hide: frozenset[str] = HIDDEN_KEYS) -> Any:
             continue
         if key == "draw_pile" and isinstance(v, list):
             # The real game shows the draw pile sorted, never in draw order.
-            out[key] = dict(sorted(Counter(_card_key(c) for c in v).items()))
+            out[key] = _draw_pile(v)
         elif key in ENEMY_LISTS and isinstance(v, list):
             out[key] = [_scrub(e, HIDDEN_KEYS | HIDDEN_ENEMY_FIELDS) for e in v]
         else:

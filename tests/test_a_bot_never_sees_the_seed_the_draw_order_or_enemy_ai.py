@@ -5,9 +5,11 @@ from spirebench.gateway.observe import observation
 RAW = {
     "type": "decision", "decision": "combat_play", "round": 1,
     "rng": {"run_seed": 1417, "counters": {"shuffle": 11}},
-    "draw_pile": [{"id": "CARD.STRIKE", "upgraded": False}, {"id": "CARD.BASH", "upgraded": True},
-                  {"id": "CARD.STRIKE", "upgraded": False}],
-    "draw_pile_count": 3,
+    "draw_pile": [{"index": 0, "id": "CARD.STRIKE", "upgraded": False, "cost": 1},
+                  {"index": 1, "id": "CARD.BASH", "upgraded": True, "cost": 2},
+                  {"index": 2, "id": "CARD.STRIKE", "upgraded": False, "cost": 1},
+                  {"index": 3, "id": "CARD.STRIKE", "upgraded": False, "cost": 0, "enchantment": "SHARP"}],
+    "draw_pile_count": 4,
     "enemies": [{"index": 0, "hp": 40, "intents": [{"type": "Attack"}], "move_state": "BITE",
                  "ai": {"log": ["BITE"]}}],
 }
@@ -18,10 +20,23 @@ def test_the_seed_and_counters_are_gone():
     assert "rng" not in observation(RAW)
 
 
-def test_the_draw_pile_is_counts_without_order():
-    assert observation(RAW)["draw_pile"] == {"CARD.BASH+": 1, "CARD.STRIKE": 2}
-    reordered = {**RAW, "draw_pile": list(reversed(RAW["draw_pile"]))}
+PILE = [
+    {"card": {"cost": 0, "enchantment": "SHARP", "id": "CARD.STRIKE", "upgraded": False}, "count": 1},
+    {"card": {"cost": 1, "id": "CARD.STRIKE", "upgraded": False}, "count": 2},
+    {"card": {"cost": 2, "id": "CARD.BASH", "upgraded": True}, "count": 1},
+]
+
+
+def test_the_draw_pile_is_every_card_in_full_counted_without_order():
+    assert observation(RAW)["draw_pile"] == PILE
+    reordered = {**RAW, "draw_pile": [{**c, "index": i} for i, c in enumerate(reversed(RAW["draw_pile"]))]}
     assert observation(reordered) == observation(RAW)  # the order cannot be read back
+
+
+def test_a_card_changed_in_combat_keeps_what_changed():
+    # A cost, enchantment or affliction set on one copy is what the game shows on it.
+    cards = [c["card"] for c in observation(RAW)["draw_pile"] if c["card"]["id"] == "CARD.STRIKE"]
+    assert {c["cost"] for c in cards} == {0, 1} and any(c.get("enchantment") == "SHARP" for c in cards)
 
 
 def test_enemy_ai_state_is_gone_but_the_intent_stays():
@@ -52,4 +67,4 @@ def test_a_card_pick_opened_mid_fight_hides_its_nested_combat_board_too():
     assert {"rng", "ai", "move_state"} <= set(_keys(pick))  # shown to fail: the raw pick carries them
     obs = observation(pick)
     assert not {"rng", "ai", "move_state"} & set(_keys(obs))
-    assert obs["combat"]["draw_pile"] == {"CARD.BASH+": 1, "CARD.STRIKE": 2}
+    assert obs["combat"]["draw_pile"] == PILE

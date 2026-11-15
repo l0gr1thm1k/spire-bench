@@ -187,7 +187,7 @@ public static class KeyedGuard
     /// </summary>
     static readonly Dictionary<string, string[]> Allowed = new()
     {
-        ["start_run"] = new[] { "character", "ascension", "seed", "act1", "interactive_potion_swap" },
+        ["start_run"] = new[] { "character", "ascension", "seed", "act1" },
         ["action"] = new[] { "action", "args" },
         ["legal_actions"] = Array.Empty<string>(),
         ["quit"] = Array.Empty<string>(),

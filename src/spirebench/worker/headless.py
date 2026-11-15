@@ -20,7 +20,6 @@ before anything reaches a bot.
 from __future__ import annotations
 
 import hashlib
-import itertools
 import json
 import os
 import subprocess
@@ -34,7 +33,6 @@ from typing import IO, Any, Protocol
 REPO = Path(__file__).resolve().parents[3]
 PYCLI = REPO / "vendor" / "spire-mentor" / "sts2-pycli"
 DEFAULT_GAME_VERSION = "v0.111.0"
-MAX_SELECT_CHOICES = 64  # enough for a random player; the gateway will need the full rule
 FAST_START_ENV = {"DOTNET_TieredPGO": "0", "DOTNET_TC_QuickJitForLoops": "1", "DOTNET_ReadyToRun": "1"}
 ERROR_SAMPLE_MAX = 20  # the count is exact; only the kept lines are capped
 
@@ -56,8 +54,9 @@ def _world_error_matcher() -> Callable[[str], bool]:
 
 
 def harness_dll(game_version: str = DEFAULT_GAME_VERSION, config: str = "Release") -> Path:
-    """The upstream harness, which takes a seed string."""
-    return PYCLI / "src" / "Sts2Headless" / "bin" / game_version / config / "net9.0" / "Sts2Headless.dll"
+    """The patched, unkeyed harness (harness/build_harness.sh), which takes a seed string."""
+    return (REPO / "build" / "harness-src" / game_version / "src" / "Sts2Headless" / "bin" / game_version / config
+            / "net9.0" / "Sts2Headless.dll")
 
 
 def keyed_dir(game_version: str = DEFAULT_GAME_VERSION, plant: bool = False, trace: bool = False,
@@ -289,10 +288,8 @@ class HeadlessGame:
     def _start(self, character: str, ascension: int, seed: str) -> dict[str, Any]:
         # act1 "roll": the seed picks act 1 as the game does. Without it the
         # harness always starts in Overgrowth (Thomas Friedel's review of PR 1).
-        # interactive_potion_swap: a potion reward on a full belt is a decision,
-        # as in the real game, rather than being dropped (one of cygn's fixes).
         return self.send({"cmd": "start_run", "character": character, "ascension": ascension,
-                          "seed": seed, "act1": "roll", "interactive_potion_swap": True})
+                          "seed": seed, "act1": "roll"})
 
     def act(self, verb: str, args: dict[str, Any]) -> dict[str, Any]:
         cmd: dict[str, Any] = {"cmd": "action", "action": verb}
@@ -388,20 +385,36 @@ def _card_reward(view: dict[str, Any]) -> list[Choice]:
 
 
 def _card_select(view: dict[str, Any]) -> list[Choice]:
+    """One card at a time, as the game's own screen takes them, so the moves grow with the cards, not their subsets.
+
+    ``selected`` holds the picks so far (see ``take``). A pick that reaches
+    ``max_select`` is sent at once; below it, ``select_cards`` confirms once
+    ``min_select`` is met. The screen can be left empty when the game allows it:
+    ``min_select`` 0, or a ``cancelable`` selection.
+    """
     idxs = [c["index"] for c in view.get("cards") or []]
-    min_sel = int(view.get("min_select") or 0)
-    max_sel = int(view.get("max_select") or max(min_sel, 1))
-    sizes = range(max(min_sel, 1), min(max_sel, len(idxs)) + 1)
-    combos = itertools.chain.from_iterable(itertools.combinations(idxs, n) for n in sizes)
-    out: list[Choice] = [("select_cards", {"indices": ",".join(str(i) for i in combo)})
-                         for combo in itertools.islice(combos, MAX_SELECT_CHOICES)]
-    if min_sel == 0:
+    picked = list(view.get("selected") or [])
+    min_sel, max_sel = select_bounds(view)
+    out: list[Choice] = []
+    if len(picked) < max_sel:
+        out.extend(("pick_card", {"card_index": i}) for i in idxs if i not in picked)
+    if picked and len(picked) >= min_sel:
+        out.append(("select_cards", {"indices": _indices(picked)}))
+    if not picked and (min_sel == 0 or view.get("cancelable") is True):
         out.append(("skip_select", {}))
     return out
 
 
-def _potion_swap(view: dict[str, Any]) -> list[Choice]:
-    return [("potion_swap", {"discard_slot": o.get("discard_slot")}) for o in view.get("options") or []]
+def select_bounds(view: dict[str, Any]) -> tuple[int, int]:
+    """How many cards a selection takes, at least and at most, capped by how many it offers."""
+    offered = len(view.get("cards") or [])
+    min_sel = min(int(view.get("min_select") or 0), offered)
+    max_sel = view.get("max_select")
+    return min_sel, max(min_sel, min(offered, int(max_sel) if max_sel is not None else offered))
+
+
+def _indices(picked: list[int]) -> str:
+    return ",".join(str(i) for i in sorted(picked))
 
 
 def _bundle(view: dict[str, Any]) -> list[Choice]:
@@ -430,10 +443,45 @@ def _shop(view: dict[str, Any]) -> list[Choice]:
     return out
 
 
+def _rewards(view: dict[str, Any]) -> list[Choice]:
+    # A potion on a full belt stays on the screen until a slot is free (PotionReward.OnSelect).
+    full = _belt_is_full(view.get("player") or {})
+    out = [("take_reward", {"reward_index": r["index"]}) for r in view.get("rewards") or []
+           if not (full and r.get("kind") == "potion")]
+    if view.get("can_leave"):
+        out.append(("leave_rewards", {}))
+    return out
+
+
+def _treasure(view: dict[str, Any]) -> list[Choice]:
+    out: list[Choice] = [] if view.get("chest_opened") else [("open_chest", {})]
+    out.extend(("take_relic", {"relic_index": r["index"]}) for r in view.get("relics") or [])
+    out.append(("leave_room", {}))
+    return out
+
+
+def _belt(view: dict[str, Any]) -> list[Choice]:
+    """Drinks and discards out of combat, as the harness marks each potion (no enemy to aim at here)."""
+    out: list[Choice] = []
+    for p in (view.get("player") or {}).get("potions") or []:
+        if p.get("can_use"):
+            out.append(("use_potion", {"potion_index": p["index"]}))
+        if p.get("can_discard"):
+            out.append(("discard_potion", {"potion_index": p["index"]}))
+    return out
+
+
 _SCREENS = {
     "event_choice": _options, "rest_site": _options, "map_select": _map, "card_reward": _card_reward,
-    "card_select": _card_select, "potion_swap": _potion_swap, "bundle_select": _bundle, "shop": _shop,
+    "card_select": _card_select, "bundle_select": _bundle, "shop": _shop, "rewards": _rewards,
+    "treasure": _treasure,
 }
+# The belt is open on these screens; the others are a choice the game is waiting on mid-action.
+_BELT_SCREENS = {"event_choice", "rest_site", "map_select", "shop", "rewards", "treasure"}
+
+
+class UnknownScreen(RuntimeError):
+    """The harness showed a screen nobody has mapped to the moves a player has there."""
 
 
 def legal_choices(game: Game, view: dict[str, Any]) -> list[Choice]:
@@ -443,13 +491,32 @@ def legal_choices(game: Game, view: dict[str, Any]) -> list[Choice]:
     the decision payload. Adapted from spire-mentor's ``run_parity.enumerate_choices``
     (MIT). Differences: the shop reads ``cost`` and ``is_stocked``, which is
     what the harness sends, offers card removal, and offers no potion on a full
-    belt; a rest-site option needs ``is_enabled``. Potions can't yet be used or
-    discarded outside combat, because the harness doesn't support it. A multi-card pick
-    lists at most MAX_SELECT_CHOICES selections, which is enough for a random
-    player but not for the gateway.
+    belt; a rest-site option needs ``is_enabled``; a multi-card pick is made a
+    card at a time (``pick_card``), which only ``take`` understands. A screen
+    with no known moves raises ``UnknownScreen`` naming it, rather than reading
+    as a game with nothing left to do.
     """
     dec = str(view.get("decision") or view.get("type"))
     if dec == "combat_play":
         return game.combat_actions()
     screen = _SCREENS.get(dec)
-    return screen(view) if screen else []
+    if screen is None:
+        raise UnknownScreen(f"no moves are known for the {dec!r} screen (room {view.get('room_type')!r})")
+    return screen(view) + (_belt(view) if dec in _BELT_SCREENS else [])
+
+
+def take(game: Game, view: dict[str, Any], choice: Choice) -> tuple[dict[str, Any], Choice | None]:
+    """Make one move from ``legal_choices``: the next view, and the move sent to the game (None if none was).
+
+    A ``pick_card`` stays on this side of the pipe, adding the card to the
+    view's ``selected``, until it fills the selection; then the whole set goes
+    to the game as one ``select_cards``. So a transcript holds only game moves.
+    """
+    verb, args = choice
+    if verb != "pick_card":
+        return game.act(verb, args), choice
+    picked = sorted([*(view.get("selected") or []), int(args["card_index"])])
+    if len(picked) < select_bounds(view)[1]:
+        return {**view, "selected": picked}, None
+    sent: Choice = ("select_cards", {"indices": _indices(picked)})
+    return game.act(*sent), sent

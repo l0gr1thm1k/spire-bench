@@ -10,7 +10,7 @@ import random
 import pytest
 from conftest import GAME_VERSION
 
-from spirebench.worker.headless import HeadlessGame, harness_dll, legal_choices
+from spirebench.worker.headless import HeadlessGame, harness_dll, legal_choices, take
 
 pytestmark = pytest.mark.skipif(not harness_dll(GAME_VERSION).exists(), reason="Sts2Headless not built here")
 
@@ -23,9 +23,9 @@ def _play(seed: str, move_seed: int) -> tuple:
         for _ in range(5000):
             if view.get("decision") == "game_over":
                 break
-            verb, args = rng.choice(legal_choices(game, view))
-            trace.append((verb, tuple(sorted(args.items()))))
-            after = game.act(verb, args)
+            choice = rng.choice(legal_choices(game, view))
+            trace.append((choice[0], tuple(sorted(choice[1].items()))))
+            after, _ = take(game, view, choice)
             if after.get("type") != "error":
                 view = after
         # A loop of rejected moves would repeat identically too, so the game must really end.

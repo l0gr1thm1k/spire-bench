@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the keyed harness: build/keyed/<game version>/ (the gateway's worker), from the
-# vendored Sts2Headless build and its game DLLs. Pass --plant-unkeyed-draw to build the
+# patched Sts2Headless build (harness/build_harness.sh) and its game DLLs. Pass --plant-unkeyed-draw to build the
 # test-only harness at build/keyed-plant/<game version>/ instead, or --trace-streams to build
 # tools/fuzz_keyed.py's harness at build/keyed-trace/<game version>/, which logs each stream it opens.
 # --fuzz-deep builds tools/fuzz_keyed.py --deep's two harnesses, where the player never drops below 1 HP:
@@ -11,8 +11,8 @@ repo=$(dirname "$here")
 version=${1:?usage: build_keyed.sh GAME_VERSION [--plant-unkeyed-draw | --trace-streams | --fuzz-deep]}
 plant=${2:-}
 pycli=$repo/vendor/spire-mentor/sts2-pycli
-bin=$pycli/src/Sts2Headless/bin/$version/Release/net9.0
-[[ -f $bin/Sts2Headless.dll ]] || { echo "no harness build at $bin; build Sts2Headless for $version first" >&2; exit 1; }
+bin=$repo/build/harness-src/$version/src/Sts2Headless/bin/$version/Release/net9.0
+[[ -f $bin/Sts2Headless.dll ]] || { echo "no harness build at $bin; run harness/build_harness.sh $version first" >&2; exit 1; }
 [[ -f $pycli/lib/$version/sts2.dll ]] || { echo "no game DLLs at $pycli/lib/$version" >&2; exit 1; }
 out=$repo/build/keyed/$version
 case $plant in
