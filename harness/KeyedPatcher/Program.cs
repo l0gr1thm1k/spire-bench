@@ -2,7 +2,7 @@
 // every game draw comes from the episode key (see harness/KeyedRng):
 //   MegaRandom.Reinitialise(seed) opens the keyed stream for that seed,
 //   MegaRandom.NextULongInner (the one method every draw goes through) draws from it,
-//   MegaRandom.NextBytes is refused under a key,
+//   MegaRandom.NextBytes, and restoring a MegaRandom from a save (v0.111.0+), are refused under a key,
 //   Rng.Chaotic, the game's clock-seeded generator, is a keyed one per game,
 //   every call to another source of randomness first asks KeyedGuard.Unkeyed,
 //   RunSimulator.StartRun takes the key where it took a seed string.
@@ -21,6 +21,7 @@ static class Program
     const string MegaRandom = "MegaCrit.Sts2.Core.Random.MegaRandom";
     const string Rng = "MegaCrit.Sts2.Core.Random.Rng";
     const string RunSimulator = "Sts2Headless.RunSimulator";
+    const string SerializableRng = "MegaCrit.Sts2.Core.Saves.SerializableRng";
 
     static int Main(string[] argv)
     {
@@ -97,6 +98,7 @@ static class Program
             Keyed = Get("SpireBench.Keyed.KeyedStreams", "Keyed");
             Next = Get("SpireBench.Keyed.KeyedStreams", "Next");
             RefuseBytes = Get("SpireBench.Keyed.KeyedStreams", "RefuseBytes");
+            RefuseRestore = Get("SpireBench.Keyed.KeyedStreams", "RefuseRestore");
             Begin = Get("SpireBench.Keyed.KeyedStreams", "Begin");
             KeyActive = Get("SpireBench.Keyed.KeyedStreams", "get_KeyActive");
             CurrentChaotic = Get("SpireBench.Keyed.KeyedStreams", "CurrentChaotic");
@@ -107,7 +109,7 @@ static class Program
             TraceOpen = Get("SpireBench.Keyed.KeyedStreams", "TraceOpen");
         }
 
-        public MethodReference TraceOpen, Open, Keyed, Next, RefuseBytes, Begin, Unkeyed, Command, KeyActive, CurrentChaotic, OpenChaotic, SetChaotic;
+        public MethodReference TraceOpen, Open, Keyed, Next, RefuseBytes, RefuseRestore, Begin, Unkeyed, Command, KeyActive, CurrentChaotic, OpenChaotic, SetChaotic;
     }
 
     static FieldDefinition KeyMegaRandom(ModuleDefinition module, Api api)
@@ -116,7 +118,7 @@ static class Program
         var stream = new FieldDefinition("__keyedStream", FieldAttributes.Assembly, module.TypeSystem.Object);
         type.Fields.Add(stream);
 
-        var reinit = Only(type, "Reinitialise");
+        var reinit = SeededReinitialise(type);
         Prepend(reinit, il => new[]
         {
             il.Create(OpCodes.Ldarg_0), il.Create(OpCodes.Ldarg_1), il.Create(OpCodes.Call, api.Open),
@@ -138,46 +140,91 @@ static class Program
             il.Create(OpCodes.Ldarg_0), il.Create(OpCodes.Ldfld, stream), il.Create(OpCodes.Call, api.RefuseBytes),
         });
 
-        var touching = type.Methods.Where(m => m.HasBody && m.Body.Instructions.Any(
-            i => i.Operand is FieldReference f && f.Name is "_s0" or "_s1" or "_s2" or "_s3")).Select(m => m.Name).OrderBy(n => n);
-        var expected = new[] { "NextBytes", "NextULongInner", "Reinitialise" };
+        var reviewed = new List<MethodDefinition> { reinit, inner, Only(type, "NextBytes") };
+        foreach (var restore in type.Methods.Where(m => m.Name == "Reinitialise" && m != reinit))
+        {
+            if (restore.Parameters.Count != 1 || restore.Parameters[0].ParameterType.FullName != SerializableRng)
+                throw new InvalidOperationException($"unreviewed {restore.FullName}; this game build needs a new review");
+            Prepend(restore, il => new[] { il.Create(OpCodes.Call, api.RefuseRestore) });
+            reviewed.Add(restore);
+        }
+        // Rng.ToSerializable (the harness's per-view rng counters) copies the state out. Under a key NextULongInner never
+        // advances it, so it holds what the public seed set; it must only read it.
+        if (type.Methods.SingleOrDefault(m => m.Name == "FillSerializableState") is { } fill)
+        {
+            if (fill.Body.Instructions.Any(i => i.OpCode.Code == Code.Stfld && IsState(i.Operand)))
+                throw new InvalidOperationException("MegaRandom.FillSerializableState writes the state; this game build needs a new review");
+            reviewed.Add(fill);
+        }
+
+        var touching = type.Methods.Where(m => m.HasBody && m.Body.Instructions.Any(i => IsState(i.Operand)))
+            .Select(m => m.FullName).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        var expected = reviewed.Select(m => m.FullName).OrderBy(n => n, StringComparer.Ordinal).ToList();
         if (!touching.SequenceEqual(expected))
             throw new InvalidOperationException($"MegaRandom's state is touched by {string.Join(", ", touching)}, not only {string.Join(", ", expected)}; this game build needs a new review");
-        Console.WriteLine("  keyed MegaRandom.Reinitialise, NextULongInner, NextBytes");
+        Console.WriteLine($"  keyed MegaRandom: {string.Join(", ", reviewed.Select(m => $"{m.Name}({string.Join(",", m.Parameters.Select(p => p.ParameterType.Name))})"))}");
         return stream;
     }
+
+    static bool IsState(object? operand) =>
+        operand is FieldReference f && f.DeclaringType.FullName == MegaRandom && f.Name is "_s0" or "_s1" or "_s2" or "_s3";
+
+    /// <summary>Reinitialise(ulong seed): every generator the game seeds goes through it.</summary>
+    static MethodDefinition SeededReinitialise(TypeDefinition type) =>
+        type.Methods.Single(m => m.Name == "Reinitialise" && m.HasBody && m.Parameters.Count == 1
+                                 && m.Parameters[0].ParameterType.MetadataType == MetadataType.UInt64);
 
     /// <summary>Under a key, Rng.Chaotic returns this game's own Rng, made on first use on the chaotic stream.</summary>
     static void KeyChaotic(ModuleDefinition module, Api api, FieldDefinition stream)
     {
         var rng = module.GetType(Rng) ?? throw new InvalidOperationException($"{Rng} not found");
         var getter = Only(rng, "get_Chaotic");
-        var ctor = rng.Methods.Single(m => m.IsConstructor && !m.IsStatic && m.Parameters.Count == 2
-                                           && m.Parameters[0].ParameterType.MetadataType == MetadataType.UInt32
-                                           && m.Parameters[1].ParameterType.MetadataType == MetadataType.Int32);
+        var (ctor, seedArgs) = SeededRngCtor(rng);
         var random = rng.Fields.Single(f => f.Name == "_random" && f.FieldType.FullName == MegaRandom);
         var original = getter.Body.Instructions[0];
         Prepend(getter, il =>
         {
             var cast = il.Create(OpCodes.Castclass, rng);
-            return new[]
+            var code = new List<Instruction>
             {
                 il.Create(OpCodes.Call, api.KeyActive), il.Create(OpCodes.Brfalse, original),
                 il.Create(OpCodes.Call, api.CurrentChaotic), il.Create(OpCodes.Dup), il.Create(OpCodes.Brtrue, cast),
-                il.Create(OpCodes.Pop), il.Create(OpCodes.Ldc_I4_0), il.Create(OpCodes.Ldc_I4_0), il.Create(OpCodes.Newobj, ctor),
+                il.Create(OpCodes.Pop),
+            };
+            code.AddRange(seedArgs(il));
+            code.AddRange(new[]
+            {
+                il.Create(OpCodes.Newobj, ctor),
                 il.Create(OpCodes.Dup), il.Create(OpCodes.Ldfld, random), il.Create(OpCodes.Call, api.OpenChaotic),
                 il.Create(OpCodes.Stfld, stream),
                 il.Create(OpCodes.Call, api.SetChaotic),
                 cast, il.Create(OpCodes.Ret),
-            };
+            });
+            return code.ToArray();
         });
-        Console.WriteLine("  keyed Rng.Chaotic");
+        Console.WriteLine($"  keyed Rng.Chaotic through {ctor.FullName}");
+    }
+
+    /// <summary>The Rng constructor Chaotic is built with, and its zero seed: (UInt32 seed, Int32 counter) to v0.107.1, (UInt64 seed) from v0.111.0.</summary>
+    static (MethodDefinition, Func<ILProcessor, Instruction[]>) SeededRngCtor(TypeDefinition rng)
+    {
+        bool Shape(MethodDefinition m, params MetadataType[] types) => m.IsConstructor && !m.IsStatic
+            && m.Parameters.Select(p => p.ParameterType.MetadataType).SequenceEqual(types);
+        var ctors = rng.Methods.Where(m => m.IsConstructor && !m.IsStatic).ToList();
+        var old = ctors.SingleOrDefault(m => Shape(m, MetadataType.UInt32, MetadataType.Int32));
+        if (old is not null)
+            return (old, il => new[] { il.Create(OpCodes.Ldc_I4_0), il.Create(OpCodes.Ldc_I4_0) });
+        var u64 = ctors.SingleOrDefault(m => Shape(m, MetadataType.UInt64));
+        if (u64 is not null)
+            return (u64, il => new[] { il.Create(OpCodes.Ldc_I8, 0L) });
+        throw new InvalidOperationException("unreviewed Rng constructors: "
+            + string.Join(", ", ctors.Select(m => m.FullName)));
     }
 
     /// <summary>The trace build: MegaRandom.Reinitialise first logs the stream it is about to open.</summary>
     static void TraceStreams(ModuleDefinition module, Api api)
     {
-        var reinit = Only(module.GetType(MegaRandom), "Reinitialise");
+        var reinit = SeededReinitialise(module.GetType(MegaRandom));
         Prepend(reinit, il => new[] { il.Create(OpCodes.Ldarg_1), il.Create(OpCodes.Call, api.TraceOpen) });
         Console.WriteLine("  TRACING every stream opened (trace build, never the gateway's)");
     }

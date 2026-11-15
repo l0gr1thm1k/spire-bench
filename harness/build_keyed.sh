@@ -19,7 +19,10 @@ case $plant in
   --trace-streams) out=$repo/build/keyed-trace/$version ;;
   *) echo "unknown option $plant" >&2; exit 2 ;;
 esac
+# A non-default build's text is vendored beside the default as localization_eng_<version>.
+loc=$pycli/localization_eng_$version
+[[ -d $loc ]] || loc=$pycli/localization_eng
 dotnet build "$here/KeyedRng" -c Release -o "$repo/build/keyedrng" --nologo -v q
 dotnet run --project "$here/KeyedPatcher" -c Release -- \
   --bin "$bin" --lib "$pycli/lib/$version" --keyedrng "$repo/build/keyedrng/KeyedRng.dll" \
-  --localization "$pycli/localization_eng" --out "$out" $plant
+  --localization "$loc" --out "$out" $plant

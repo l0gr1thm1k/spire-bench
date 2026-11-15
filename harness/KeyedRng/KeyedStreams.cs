@@ -123,6 +123,13 @@ public static class KeyedStreams
 
     public static ulong Next(object stream) => ((Stream)stream).Next();
 
+    /// <summary>MegaRandom.Reinitialise(SerializableRng) (v0.111.0+) loads a generator from a save; a keyed game never loads one.</summary>
+    public static void RefuseRestore()
+    {
+        if (Volatile.Read(ref _key) is not null)
+            throw new UnkeyedDrawException("a generator restored from a save in a keyed game");
+    }
+
     /// <summary>MegaRandom.NextBytes writes its state directly; under a key it is refused rather than left unkeyed.</summary>
     public static void RefuseBytes(object? stream)
     {
