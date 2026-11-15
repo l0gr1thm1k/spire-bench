@@ -6,6 +6,7 @@
 //   Rng.Chaotic, the game's clock-seeded generator, is a keyed one per game,
 //   every call to another source of randomness first asks KeyedGuard.Unkeyed,
 //   RunSimulator.StartRun takes the key where it took a seed string.
+// --trace-streams (a separate build, for tools/fuzz_keyed.py) also logs each stream opened.
 // Each rewrite must apply exactly as counted, or nothing is written.
 using System;
 using System.Collections.Generic;
@@ -26,7 +27,7 @@ static class Program
         var opts = Options.Parse(argv);
         if (opts is null)
         {
-            Console.Error.WriteLine("usage: KeyedPatcher --bin DIR --lib DIR --keyedrng DLL --localization DIR --out DIR [--plant-unkeyed-draw]");
+            Console.Error.WriteLine("usage: KeyedPatcher --bin DIR --lib DIR --keyedrng DLL --localization DIR --out DIR [--plant-unkeyed-draw] [--trace-streams]");
             return 2;
         }
         var outLib = Path.Combine(opts.Out, "lib");
@@ -48,12 +49,15 @@ static class Program
             var api = new Api(module, keyed);
             var stream = KeyMegaRandom(module, api);
             KeyChaotic(module, api, stream);
+            if (opts.TraceStreams)
+                TraceStreams(module, api);
             Console.WriteLine($"  guarded {GuardUnkeyedSources(module, api)} other randomness call sites in sts2.dll");
         });
         Rewrite(Path.Combine(opts.Out, "Sts2Headless.dll"), resolver, module =>
         {
             var api = new Api(module, keyed);
             TakeKeyAtStartRun(module, api);
+            RefuseDebugCommands(module, api);
             if (opts.PlantUnkeyedDraw)
                 PlantUnkeyedDraw(module);
             Console.WriteLine($"  guarded {GuardUnkeyedSources(module, api)} other randomness call sites in Sts2Headless.dll");
@@ -62,22 +66,23 @@ static class Program
         return 0;
     }
 
-    sealed record Options(string Bin, string Lib, string KeyedRng, string Localization, string Out, bool PlantUnkeyedDraw)
+    sealed record Options(string Bin, string Lib, string KeyedRng, string Localization, string Out, bool PlantUnkeyedDraw, bool TraceStreams)
     {
         public static Options? Parse(string[] argv)
         {
             var named = new Dictionary<string, string>();
-            bool plant = false;
+            bool plant = false, trace = false;
             for (int i = 0; i < argv.Length; i++)
             {
                 if (argv[i] == "--plant-unkeyed-draw") plant = true;
+                else if (argv[i] == "--trace-streams") trace = true;
                 else if (argv[i].StartsWith("--") && i + 1 < argv.Length) named[argv[i]] = argv[++i];
                 else return null;
             }
             string[] need = { "--bin", "--lib", "--keyedrng", "--localization", "--out" };
             if (need.Any(k => !named.ContainsKey(k)))
                 return null;
-            return new Options(named["--bin"], named["--lib"], named["--keyedrng"], named["--localization"], named["--out"], plant);
+            return new Options(named["--bin"], named["--lib"], named["--keyedrng"], named["--localization"], named["--out"], plant, trace);
         }
     }
 
@@ -98,9 +103,11 @@ static class Program
             OpenChaotic = Get("SpireBench.Keyed.KeyedStreams", "OpenChaotic");
             SetChaotic = Get("SpireBench.Keyed.KeyedStreams", "SetChaotic");
             Unkeyed = Get("SpireBench.Keyed.KeyedGuard", "Unkeyed");
+            Command = Get("SpireBench.Keyed.KeyedGuard", "Command");
+            TraceOpen = Get("SpireBench.Keyed.KeyedStreams", "TraceOpen");
         }
 
-        public MethodReference Open, Keyed, Next, RefuseBytes, Begin, Unkeyed, KeyActive, CurrentChaotic, OpenChaotic, SetChaotic;
+        public MethodReference TraceOpen, Open, Keyed, Next, RefuseBytes, Begin, Unkeyed, Command, KeyActive, CurrentChaotic, OpenChaotic, SetChaotic;
     }
 
     static FieldDefinition KeyMegaRandom(ModuleDefinition module, Api api)
@@ -167,6 +174,14 @@ static class Program
         Console.WriteLine("  keyed Rng.Chaotic");
     }
 
+    /// <summary>The trace build: MegaRandom.Reinitialise first logs the stream it is about to open.</summary>
+    static void TraceStreams(ModuleDefinition module, Api api)
+    {
+        var reinit = Only(module.GetType(MegaRandom), "Reinitialise");
+        Prepend(reinit, il => new[] { il.Create(OpCodes.Ldarg_1), il.Create(OpCodes.Call, api.TraceOpen) });
+        Console.WriteLine("  TRACING every stream opened (trace build, never the gateway's)");
+    }
+
     static void TakeKeyAtStartRun(ModuleDefinition module, Api api)
     {
         var sim = module.GetType(RunSimulator) ?? throw new InvalidOperationException($"{RunSimulator} not found");
@@ -177,6 +192,16 @@ static class Program
             il.Create(OpCodes.Ldarg, seed), il.Create(OpCodes.Call, api.Begin), il.Create(OpCodes.Starg, seed),
         });
         Console.WriteLine("  RunSimulator.StartRun takes the episode key");
+    }
+
+    /// <summary>HandleCommand first asks KeyedGuard.Command, which refuses every command the gateway does not send.</summary>
+    static void RefuseDebugCommands(ModuleDefinition module, Api api)
+    {
+        var program = module.GetType("Sts2Headless.Program") ?? throw new InvalidOperationException("Sts2Headless.Program not found");
+        var handle = Only(program, "HandleCommand");
+        var cmd = handle.Parameters.Single(p => p.ParameterType.FullName == "System.Text.Json.JsonElement");
+        Prepend(handle, il => new[] { il.Create(OpCodes.Ldarg, cmd), il.Create(OpCodes.Call, api.Command) });
+        Console.WriteLine("  Program.HandleCommand refuses every command the gateway does not send");
     }
 
     /// <summary>For the test that an unkeyed draw voids the game: StartRunImpl first draws from System.Random.</summary>

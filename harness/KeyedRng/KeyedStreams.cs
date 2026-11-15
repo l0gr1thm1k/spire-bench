@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 
 namespace SpireBench.Keyed;
@@ -95,6 +97,28 @@ public static class KeyedStreams
         return false;
     }
 
+    /// <summary>
+    /// The trace build only (build_keyed.sh --trace-streams, for tools/fuzz_keyed.py): one stderr
+    /// line per stream opened under the key, naming its seed, who opened it, and its first draw.
+    /// </summary>
+    public static void TraceOpen(ulong seed)
+    {
+        if (Open(seed) is not Stream stream)
+            return;
+        var by = new List<string>();
+        foreach (var frame in new System.Diagnostics.StackTrace(1, false).GetFrames())
+        {
+            var m = frame.GetMethod();
+            if (m?.DeclaringType is null)
+                continue;
+            by.Add($"{m.DeclaringType.FullName}.{m.Name}");
+            if (by.Count >= 6 || !m.DeclaringType.FullName!.StartsWith("MegaCrit.Sts2.Core.Random."))
+                break;
+        }
+        var line = JsonSerializer.Serialize(new { spirebench_trace = "open", seed, by, first = stream.Next() });
+        Console.Error.WriteLine(line);
+    }
+
     public static bool KeyActive => Volatile.Read(ref _key) is not null;
 
     public static ulong Next(object stream) => ((Stream)stream).Next();
@@ -148,4 +172,34 @@ public static class KeyedGuard
         if (KeyedStreams.KeyActive)
             throw new UnkeyedDrawException(source);
     }
+
+    /// <summary>
+    /// The harness's commands the gateway sends, with the fields it sends. Every other
+    /// command (rng_probe, roll_acts, get_state, set_draw_order, dump_*, saves...) can read
+    /// or set what the key decides, so the keyed build refuses it before it runs.
+    /// </summary>
+    static readonly Dictionary<string, string[]> Allowed = new()
+    {
+        ["start_run"] = new[] { "character", "ascension", "seed", "act1", "interactive_potion_swap" },
+        ["action"] = new[] { "action", "args" },
+        ["legal_actions"] = Array.Empty<string>(),
+        ["quit"] = Array.Empty<string>(),
+    };
+
+    public static void Command(JsonElement cmd)
+    {
+        var name = cmd.ValueKind == JsonValueKind.Object && cmd.TryGetProperty("cmd", out var c) && c.ValueKind == JsonValueKind.String
+            ? c.GetString()! : "";
+        if (!Allowed.TryGetValue(name, out var fields))
+            throw new CommandRefusedException($"command {(name == "" ? "(none)" : name)}");
+        foreach (var prop in cmd.EnumerateObject())
+            if (prop.Name != "cmd" && Array.IndexOf(fields, prop.Name) < 0)
+                throw new CommandRefusedException($"field {prop.Name} of {name}");
+    }
+}
+
+/// <summary>A harness command, or a field of one, the keyed build does not take.</summary>
+public sealed class CommandRefusedException : InvalidOperationException
+{
+    public CommandRefusedException(string what) : base($"refused by the keyed harness: {what}") { }
 }

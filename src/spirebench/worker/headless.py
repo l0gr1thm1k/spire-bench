@@ -60,13 +60,17 @@ def harness_dll(game_version: str = DEFAULT_GAME_VERSION, config: str = "Release
     return PYCLI / "src" / "Sts2Headless" / "bin" / game_version / config / "net9.0" / "Sts2Headless.dll"
 
 
-def keyed_dir(game_version: str = DEFAULT_GAME_VERSION, plant: bool = False) -> Path:
-    """The keyed harness; ``plant`` is the test build that makes one unkeyed draw, to show it is refused."""
-    return REPO / "build" / ("keyed-plant" if plant else "keyed") / game_version
+def keyed_dir(game_version: str = DEFAULT_GAME_VERSION, plant: bool = False, trace: bool = False) -> Path:
+    """The keyed harness; ``plant`` is the test build that makes one unkeyed draw, to show it is refused,
+    and ``trace`` the fuzzer's build, which logs every stream it opens (never the gateway's)."""
+    if plant and trace:
+        raise ValueError("the plant and trace builds are separate")
+    return REPO / "build" / ("keyed-plant" if plant else "keyed-trace" if trace else "keyed") / game_version
 
 
-def worker_dll(game_version: str = DEFAULT_GAME_VERSION, keyed: bool = True, plant: bool = False) -> Path:
-    return keyed_dir(game_version, plant) / "Sts2Headless.dll" if keyed else harness_dll(game_version)
+def worker_dll(game_version: str = DEFAULT_GAME_VERSION, keyed: bool = True, plant: bool = False,
+               trace: bool = False) -> Path:
+    return keyed_dir(game_version, plant, trace) / "Sts2Headless.dll" if keyed else harness_dll(game_version)
 
 
 def _sha256(path: Path) -> str | None:
@@ -154,13 +158,13 @@ class HeadlessGame:
 
     ``keyed`` (the default) runs the keyed build, which takes an episode key;
     otherwise the upstream build, which takes a seed string. ``plant`` runs the
-    keyed test build that makes one unkeyed draw.
+    keyed test build that makes one unkeyed draw; ``trace`` the fuzzer's build.
     """
 
     def __init__(self, game_version: str = DEFAULT_GAME_VERSION, keyed: bool = True, plant: bool = False,
-                 stderr_path: Path | None = None, timeout_s: float = 60.0) -> None:
+                 stderr_path: Path | None = None, timeout_s: float = 60.0, trace: bool = False) -> None:
         self.timeout_s, self.timed_out, self.keyed = timeout_s, False, keyed
-        dll = worker_dll(game_version, keyed, plant)
+        dll = worker_dll(game_version, keyed, plant, trace)
         if not dll.exists():
             raise FileNotFoundError(f"harness not built: {dll}")
         env = dict(os.environ)
