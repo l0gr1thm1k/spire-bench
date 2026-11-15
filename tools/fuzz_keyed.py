@@ -45,7 +45,7 @@ from typing import Any
 from spirebench.gateway.observe import observation
 from spirebench.gateway.replay_core import view_digest
 from spirebench.worker.headless import (Choice, HarnessError, HeadlessGame, harness_dll, keyed_dir, legal_choices,
-                                        seeded_deep_dll)
+                                        seeded_deep_dll, take)
 
 CHARACTER, ASCENSION = "Ironclad", 10
 View = dict[str, Any]
@@ -60,19 +60,21 @@ def play(game: HeadlessGame, start: Callable[[], View], policy: random.Random, m
     while len(made) < (len(moves) if moves is not None else max_moves):
         if view.get("type") == "error" or view.get("decision") == "game_over":
             break
+        sent: Choice | None
         if moves is not None:
-            choice = moves[len(made)]
-            after = game.act(*choice)
+            sent = moves[len(made)]
+            after = game.act(*sent)
         else:
             choices = legal_choices(game, view)
-            after = {"type": "error"}
+            after, sent = {"type": "error"}, None
             while choices and after.get("type") == "error":
-                choice = choices.pop(policy.randrange(len(choices)))
-                after = game.act(*choice)
+                after, sent = take(game, view, choices.pop(policy.randrange(len(choices))))
             if after.get("type") == "error":
                 break
-        made.append(choice)
         view = after
+        if sent is None:
+            continue  # a card picked toward a selection: nothing reached the game
+        made.append(sent)
         digests.append(view_digest(view))
         views.append(view)
     return digests, views, made

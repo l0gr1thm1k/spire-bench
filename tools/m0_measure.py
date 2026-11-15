@@ -28,7 +28,7 @@ from typing import Any
 
 from spirebench.protocol import CHARACTERS as _CHARACTER_NAMES
 from spirebench.worker.headless import (DEFAULT_GAME_VERSION, HarnessError, HeadlessGame, legal_choices, run_act,
-                                        run_floor)
+                                        run_floor, take)
 
 CHARACTERS = list(_CHARACTER_NAMES.values())
 MAX_STEPS = 20_000
@@ -80,7 +80,7 @@ def _play(game: HeadlessGame, view: dict[str, Any], rng: random.Random, row: dic
         if not choices:
             row["terminal"], row["stuck_decision"] = "no_choices", dec
             break
-        after = game.act(*choose(rng, choices))
+        after, sent = take(game, view, choose(rng, choices))
         if after.get("type") == "error":
             # A move the harness refuses: count it apart and pick again.
             row["rejected"] += 1
@@ -88,11 +88,13 @@ def _play(game: HeadlessGame, view: dict[str, Any], rng: random.Random, row: dic
                 row["terminal"], row["error"] = "too_many_rejects", str(after.get("message"))[:300]
                 break
             continue
+        view = after
+        if sent is None:
+            continue  # a card picked toward a selection: nothing reached the game
         decisions[dec] += 1
         row["actions"] += 1
         if row["actions"] == WARM_AFTER:
             row["cpu_at_warm_s"] = game.cpu_times().total - cpu0
-        view = after
     row["decisions"] = dict(decisions)
 
 

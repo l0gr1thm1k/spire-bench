@@ -20,7 +20,6 @@ before anything reaches a bot.
 from __future__ import annotations
 
 import hashlib
-import itertools
 import json
 import os
 import subprocess
@@ -34,7 +33,6 @@ from typing import IO, Any, Protocol
 REPO = Path(__file__).resolve().parents[3]
 PYCLI = REPO / "vendor" / "spire-mentor" / "sts2-pycli"
 DEFAULT_GAME_VERSION = "v0.111.0"
-MAX_SELECT_CHOICES = 64  # enough for a random player; the gateway will need the full rule
 FAST_START_ENV = {"DOTNET_TieredPGO": "0", "DOTNET_TC_QuickJitForLoops": "1", "DOTNET_ReadyToRun": "1"}
 ERROR_SAMPLE_MAX = 20  # the count is exact; only the kept lines are capped
 
@@ -388,16 +386,36 @@ def _card_reward(view: dict[str, Any]) -> list[Choice]:
 
 
 def _card_select(view: dict[str, Any]) -> list[Choice]:
+    """One card at a time, as the game's own screen takes them, so the moves grow with the cards, not their subsets.
+
+    ``selected`` holds the picks so far (see ``take``). A pick that reaches
+    ``max_select`` is sent at once; below it, ``select_cards`` confirms once
+    ``min_select`` is met. The screen can be left empty when the game allows it:
+    ``min_select`` 0, or a ``cancelable`` selection.
+    """
     idxs = [c["index"] for c in view.get("cards") or []]
-    min_sel = int(view.get("min_select") or 0)
-    max_sel = int(view.get("max_select") or max(min_sel, 1))
-    sizes = range(max(min_sel, 1), min(max_sel, len(idxs)) + 1)
-    combos = itertools.chain.from_iterable(itertools.combinations(idxs, n) for n in sizes)
-    out: list[Choice] = [("select_cards", {"indices": ",".join(str(i) for i in combo)})
-                         for combo in itertools.islice(combos, MAX_SELECT_CHOICES)]
-    if min_sel == 0:
+    picked = list(view.get("selected") or [])
+    min_sel, max_sel = select_bounds(view)
+    out: list[Choice] = []
+    if len(picked) < max_sel:
+        out.extend(("pick_card", {"card_index": i}) for i in idxs if i not in picked)
+    if picked and len(picked) >= min_sel:
+        out.append(("select_cards", {"indices": _indices(picked)}))
+    if not picked and (min_sel == 0 or view.get("cancelable") is True):
         out.append(("skip_select", {}))
     return out
+
+
+def select_bounds(view: dict[str, Any]) -> tuple[int, int]:
+    """How many cards a selection takes, at least and at most, capped by how many it offers."""
+    offered = len(view.get("cards") or [])
+    min_sel = min(int(view.get("min_select") or 0), offered)
+    max_sel = view.get("max_select")
+    return min_sel, max(min_sel, min(offered, int(max_sel) if max_sel is not None else offered))
+
+
+def _indices(picked: list[int]) -> str:
+    return ",".join(str(i) for i in sorted(picked))
 
 
 def _potion_swap(view: dict[str, Any]) -> list[Choice]:
@@ -436,6 +454,10 @@ _SCREENS = {
 }
 
 
+class UnknownScreen(RuntimeError):
+    """The harness showed a screen nobody has mapped to the moves a player has there."""
+
+
 def legal_choices(game: Game, view: dict[str, Any]) -> list[Choice]:
     """Every move the player may make on this screen, as (verb, args) pairs.
 
@@ -443,13 +465,32 @@ def legal_choices(game: Game, view: dict[str, Any]) -> list[Choice]:
     the decision payload. Adapted from spire-mentor's ``run_parity.enumerate_choices``
     (MIT). Differences: the shop reads ``cost`` and ``is_stocked``, which is
     what the harness sends, offers card removal, and offers no potion on a full
-    belt; a rest-site option needs ``is_enabled``. Potions can't yet be used or
-    discarded outside combat, because the harness doesn't support it. A multi-card pick
-    lists at most MAX_SELECT_CHOICES selections, which is enough for a random
-    player but not for the gateway.
+    belt; a rest-site option needs ``is_enabled``; a multi-card pick is made a
+    card at a time (``pick_card``), which only ``take`` understands. A screen
+    with no known moves raises ``UnknownScreen`` naming it, rather than reading
+    as a game with nothing left to do.
     """
     dec = str(view.get("decision") or view.get("type"))
     if dec == "combat_play":
         return game.combat_actions()
     screen = _SCREENS.get(dec)
-    return screen(view) if screen else []
+    if screen is None:
+        raise UnknownScreen(f"no moves are known for the {dec!r} screen (room {view.get('room_type')!r})")
+    return screen(view)
+
+
+def take(game: Game, view: dict[str, Any], choice: Choice) -> tuple[dict[str, Any], Choice | None]:
+    """Make one move from ``legal_choices``: the next view, and the move sent to the game (None if none was).
+
+    A ``pick_card`` stays on this side of the pipe, adding the card to the
+    view's ``selected``, until it fills the selection; then the whole set goes
+    to the game as one ``select_cards``. So a transcript holds only game moves.
+    """
+    verb, args = choice
+    if verb != "pick_card":
+        return game.act(verb, args), choice
+    picked = sorted([*(view.get("selected") or []), int(args["card_index"])])
+    if len(picked) < select_bounds(view)[1]:
+        return {**view, "selected": picked}, None
+    sent: Choice = ("select_cards", {"indices": _indices(picked)})
+    return game.act(*sent), sent
