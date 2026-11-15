@@ -15,10 +15,10 @@ index 75c8600..7e40860 100644
  
              case "roll_acts":
 diff --git a/src/Sts2Headless/RunSimulator.cs b/src/Sts2Headless/RunSimulator.cs
-index fe366f1..00bf1ee 100644
+index fe366f1..d53b6bc 100644
 --- a/src/Sts2Headless/RunSimulator.cs
 +++ b/src/Sts2Headless/RunSimulator.cs
-@@ -7,6 +7,7 @@ using MegaCrit.Sts2.Core.Events;
+@@ -7,12 +7,15 @@ using MegaCrit.Sts2.Core.Events;
  using MegaCrit.Sts2.Core.Entities.Cards;
  using MegaCrit.Sts2.Core.Entities.Creatures;
  using MegaCrit.Sts2.Core.Entities.Players;
@@ -26,7 +26,15 @@ index fe366f1..00bf1ee 100644
  using MegaCrit.Sts2.Core.Entities.Actions;
  using MegaCrit.Sts2.Core.GameActions;
  using MegaCrit.Sts2.Core.Helpers;
-@@ -317,50 +318,9 @@ public class RunSimulator
+ using MegaCrit.Sts2.Core.Map;
+ using MegaCrit.Sts2.Core.Models;
+ using MegaCrit.Sts2.Core.Models.Cards;
++using MegaCrit.Sts2.Core.Models.Events;
++using MegaCrit.Sts2.Core.Models.Potions;
+ using MegaCrit.Sts2.Core.Models.Characters;
+ using MegaCrit.Sts2.Core.Models.Acts;
+ using MegaCrit.Sts2.Core.Random;
+@@ -317,50 +320,9 @@ public class RunSimulator
      private int _eventAdvanceCount;
      private int _lastEventAdvanceCount;
  
@@ -77,7 +85,7 @@ index fe366f1..00bf1ee 100644
      private int _lastKnownHp;
  
      private readonly HeadlessCardSelector _cardSelector = new();
-@@ -372,7 +332,6 @@ public class RunSimulator
+@@ -372,7 +334,6 @@ public class RunSimulator
      private Task? _pendingPurchaseTask;
      // Pending shop map-entry task: an EnterMapCoord whose AfterRoomEntered
      // (Lord's Parasol buying an Orrery) parked at a card reward. See DoMapSelect.
@@ -85,7 +93,7 @@ index fe366f1..00bf1ee 100644
      // Pending rest-site task (Smith): the ChooseLocalOption task that finishes
      // the upgrade AFTER the player resolves the card selection.
      private Task? _pendingRestSiteTask;
-@@ -386,102 +345,21 @@ public class RunSimulator
+@@ -386,102 +347,21 @@ public class RunSimulator
      // "16-HP skew" the run-parity sweep flagged). Mirrors `_pendingRestSiteTask`
      // / `_pendingPurchaseTask`.
      private Task? _pendingEventOptionTask;
@@ -196,7 +204,7 @@ index fe366f1..00bf1ee 100644
              EnsureModelDbInitialized();
  
              var player = CreatePlayer(character, playedSave);
-@@ -1378,56 +1256,7 @@ public class RunSimulator
+@@ -1378,56 +1258,7 @@ public class RunSimulator
              }
              actions.Add(new Dictionary<string, object?> { ["action"] = "end_turn" });
  
@@ -254,7 +262,7 @@ index fe366f1..00bf1ee 100644
  
              return new Dictionary<string, object?>
              {
-@@ -2152,10 +1981,18 @@ public class RunSimulator
+@@ -2152,10 +1983,18 @@ public class RunSimulator
                      return DoUsePotion(player, args);
                  case "discard_potion":
                      return DoDiscardPotion(player, args);
@@ -276,7 +284,7 @@ index fe366f1..00bf1ee 100644
                  case "proceed":
                      return DoProceed(player);
                  default:
-@@ -2178,12 +2015,8 @@ public class RunSimulator
+@@ -2178,12 +2017,8 @@ public class RunSimulator
          // Reset tracking for new room
          _rewardsProcessed = false;
          _restSiteOptionTaken = false;
@@ -289,7 +297,7 @@ index fe366f1..00bf1ee 100644
          _lastKnownHp = player.Creature?.CurrentHp ?? 0;
  
          var col = Convert.ToInt32(args["col"]);
-@@ -2208,50 +2041,12 @@ public class RunSimulator
+@@ -2208,50 +2043,12 @@ public class RunSimulator
          WaitForActionExecutor();
          _syncCtx.Pump();
  
@@ -346,7 +354,7 @@ index fe366f1..00bf1ee 100644
      }
  
      private Dictionary<string, object?> DoPlayCard(Player player, Dictionary<string, object?>? args)
-@@ -2562,86 +2357,96 @@ public class RunSimulator
+@@ -2562,96 +2359,106 @@ public class RunSimulator
  
      private Dictionary<string, object?> DoSelectCardReward(Player player, Dictionary<string, object?>? args)
      {
@@ -508,8 +516,110 @@ index fe366f1..00bf1ee 100644
 +
      private Dictionary<string, object?> DoBuyCard(Player player, Dictionary<string, object?>? args)
      {
-         if (_runState?.CurrentRoom is not MerchantRoom merchantRoom)
-@@ -2998,6 +2803,7 @@ public class RunSimulator
+-        if (_runState?.CurrentRoom is not MerchantRoom merchantRoom)
++        if (ActiveInventory(_runState?.CurrentRoom) is not MerchantInventory inv)
+             return Error("Not in a shop");
+         if (args == null || !args.ContainsKey("card_index"))
+             return Error("buy_card requires 'card_index'");
+ 
+         var idx = Convert.ToInt32(args["card_index"]);
+-        var allEntries = merchantRoom.GetLocalInventory().CharacterCardEntries
+-            .Concat(merchantRoom.GetLocalInventory().ColorlessCardEntries).ToList();
++        var allEntries = inv.CharacterCardEntries
++            .Concat(inv.ColorlessCardEntries).ToList();
+         if (idx < 0 || idx >= allEntries.Count)
+             return Error($"Invalid card index {idx}");
+ 
+@@ -2661,7 +2468,7 @@ public class RunSimulator
+ 
+         try
+         {
+-            entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()).GetAwaiter().GetResult();
++            entry.OnTryPurchaseWrapper(inv).GetAwaiter().GetResult();
+             _syncCtx.Pump();
+             Log($"Bought card: {entry.CreationResult?.Card?.GetType().Name ?? "?"} for {entry.Cost}g");
+         }
+@@ -2672,13 +2479,13 @@ public class RunSimulator
+ 
+     private Dictionary<string, object?> DoBuyRelic(Player player, Dictionary<string, object?>? args)
+     {
+-        if (_runState?.CurrentRoom is not MerchantRoom merchantRoom)
++        if (ActiveInventory(_runState?.CurrentRoom) is not MerchantInventory inv)
+             return Error("Not in a shop");
+         if (args == null || !args.ContainsKey("relic_index"))
+             return Error("buy_relic requires 'relic_index'");
+ 
+         var idx = Convert.ToInt32(args["relic_index"]);
+-        var entries = merchantRoom.GetLocalInventory().RelicEntries;
++        var entries = inv.RelicEntries;
+         if (idx < 0 || idx >= entries.Count) return Error($"Invalid relic index {idx}");
+ 
+         var entry = entries[idx];
+@@ -2706,7 +2513,7 @@ public class RunSimulator
+             // selection surfaced, stash the purchase task in `_pendingPurchaseTask`
+             // so DoSelectCards (MerchantRoom branch) drives it to completion after
+             // the player resolves the selection.
+-            var task = RunOnPool(() => entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()));
++            var task = RunOnPool(() => entry.OnTryPurchaseWrapper(inv));
+             WaitUntilOptionTaskSettles(task, "relic-purchase task or selection");
+             // A `select_cards` screen (PARITY118's deck card-select) or a card
+             // reward (Orrery's 5) parks the task in `_pendingPurchaseTask`;
+@@ -2728,13 +2535,13 @@ public class RunSimulator
+ 
+     private Dictionary<string, object?> DoBuyPotion(Player player, Dictionary<string, object?>? args)
+     {
+-        if (_runState?.CurrentRoom is not MerchantRoom merchantRoom)
++        if (ActiveInventory(_runState?.CurrentRoom) is not MerchantInventory inv)
+             return Error("Not in a shop");
+         if (args == null || !args.ContainsKey("potion_index"))
+             return Error("buy_potion requires 'potion_index'");
+ 
+         var idx = Convert.ToInt32(args["potion_index"]);
+-        var entries = merchantRoom.GetLocalInventory().PotionEntries;
++        var entries = inv.PotionEntries;
+         if (idx < 0 || idx >= entries.Count) return Error($"Invalid potion index {idx}");
+ 
+         var entry = entries[idx];
+@@ -2749,7 +2556,7 @@ public class RunSimulator
+         var potionCost = entry.Cost;
+         try
+         {
+-            entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()).GetAwaiter().GetResult();
++            entry.OnTryPurchaseWrapper(inv).GetAwaiter().GetResult();
+             _syncCtx.Pump();
+             Log($"Bought potion: {potionName} for {potionCost}g");
+         }
+@@ -2763,17 +2570,17 @@ public class RunSimulator
+ 
+     private Dictionary<string, object?> DoRemoveCard(Player player)
+     {
+-        if (_runState?.CurrentRoom is not MerchantRoom merchantRoom)
++        if (ActiveInventory(_runState?.CurrentRoom) is not MerchantInventory inv)
+             return Error("Not in a shop");
+ 
+-        var removal = merchantRoom.GetLocalInventory().CardRemovalEntry;
++        var removal = inv.CardRemovalEntry;
+         if (removal == null) return Error("No card removal available");
+         if (player.Gold < removal.Cost) return Error("Not enough gold");
+ 
+         try
+         {
+             // Run on background thread so card selection can pause (same pattern as event options)
+-            var task = RunOnPool(() => removal.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()));
++            var task = RunOnPool(() => removal.OnTryPurchaseWrapper(inv));
+             // Wait until the task settles (completes or parks at a selection) rather
+             // than on a fixed 1 s budget — see WaitUntilOptionTaskSettles for why a
+             // short timeout here drops a still-in-flight task and races its writes.
+@@ -2920,7 +2727,7 @@ public class RunSimulator
+         // Extra wait for shop card removal: the purchase task needs to finish.
+         // Continuations land on the GameSyncContext, so a passive Wait would
+         // deadlock — WaitForTask drives them.
+-        if (_runState?.CurrentRoom is MerchantRoom)
++        if (ActiveInventory(_runState?.CurrentRoom) != null)
+         {
+             DrivePurchaseTask();
+             Log("Card selection in shop (card removal), refreshing shop state");
+@@ -2998,27 +2805,13 @@ public class RunSimulator
          if (idx < 0 || idx >= potionsList.Count) return Error($"Invalid potion index {idx}");
          var potion = potionsList[idx];
          if (potion == null) return Error($"No potion at index {idx}");
@@ -517,7 +627,45 @@ index fe366f1..00bf1ee 100644
  
          // Determine target based on potion's TargetType first, then fall back to target_index
          Creature? target = null;
-@@ -3047,26 +2853,71 @@ public class RunSimulator
+         var potionTargetType = potion.TargetType;
+ 
+-        // Player-targeting potions ALWAYS resolve to the player's creature,
+-        // regardless of any target_index the caller provides. This covers
+-        // Self / TargetedNoCreature AND AnyPlayer — the latter is the
+-        // TargetType for the common buff potions (Block, Strength,
+-        // Dexterity, Flex, Blood, Energy, Swift, …). Their OnUse calls
+-        // e.g. `CreatureCmd.GainBlock(target, …)` / `ApplyPower(target, …)`,
+-        // so a null target silently no-ops the whole effect (the potion is
+-        // consumed but block/strength/energy never land). In single-player
+-        // AnyPlayer == the local player's creature.
+-        if (potionTargetType == TargetType.Self
+-            || potionTargetType == TargetType.TargetedNoCreature
+-            || potionTargetType == TargetType.AnyPlayer)
+-        {
+-            target = player.Creature;
+-        }
+-        else if (potionTargetType == TargetType.AnyEnemy)
++        if (potionTargetType == TargetType.AnyEnemy)
+         {
+             // Use caller's target_index if provided, otherwise pick first alive enemy
+             if (args.TryGetValue("target_index", out var tObj) && tObj != null)
+@@ -3038,35 +2831,108 @@ public class RunSimulator
+                 target = combatState?.Enemies?.FirstOrDefault(e => e != null && e.IsAlive);
+             }
+         }
+-        // All other target types (None, All, etc.) → leave target as null
++        // The game's own manual use: the player is the target when the potion accepts the
++        // player. A TargetedNoCreature potion (Foul Potion out of combat) takes none; given
++        // the player, UsePotionAction cancels the drink.
++        else if (potion.IsValidTarget(player.Creature))
++            target = player.Creature;
+ 
+         Log($"Using potion: {potion.GetType().Name} at slot {idx} target={target?.GetType().Name ?? "none"}");
+         try
+         {
+-            var action = new MegaCrit.Sts2.Core.GameActions.UsePotionAction(potion, target, CombatManager.Instance.IsInProgress);
++            var inCombat = CombatManager.Instance.IsInProgress;
++            var action = new MegaCrit.Sts2.Core.GameActions.UsePotionAction(potion, target, inCombat);
              RunManager.Instance.ActionQueueSet.EnqueueWithoutSynchronizing(action);
              WaitForActionExecutor();
              _syncCtx.Pump();
@@ -533,6 +681,8 @@ index fe366f1..00bf1ee 100644
 +            // A drink the game cancels leaves the potion in the belt, as in the game.
 +            if ((player.Potions?.ToList() ?? new()).Contains(potion))
 +                Log("The game did not drink the potion; it stays in the belt");
++            else if (potion is FoulPotion foul && !inCombat)
++                ThrowFoulPotionAtFakeMerchant(foul);
          }
          catch (Exception ex)
          {
@@ -541,6 +691,8 @@ index fe366f1..00bf1ee 100644
 -            try { MegaCrit.Sts2.Core.Commands.PotionCmd.Discard(potion).GetAwaiter().GetResult(); } catch { }
 +            return ErrorWithTrace("Use potion failed", ex);
          }
++        if (_runState?.CurrentRoom is CombatRoom && !CombatManager.Instance.IsInProgress)
++            DriveNestedEventCombatToPlayPhase();
  
          return DetectDecisionPoint();
      }
@@ -574,8 +726,7 @@ index fe366f1..00bf1ee 100644
 +    }
 +
 +    // NPotionPopup's buttons: Usage, CanRemovePotions and the potion's own check decide
-+    // use; CanRemovePotions alone decides discard. A custom check that reads the scene
-+    // (Foul Potion at a merchant) has no scene here, so it reads as not usable.
++    // use; CanRemovePotions alone decides discard.
 +    // The game's own gate on the belt (renamed in v0.111.0).
 +    private static bool PotionsTouchable(Player player) =>
 +#if GAME_V0111
@@ -591,8 +742,28 @@ index fe366f1..00bf1ee 100644
 +        var allowed = p.Usage == PotionUsage.AnyTime
 +            || (p.Usage == PotionUsage.CombatOnly && CombatManager.Instance.IsInProgress);
 +        if (!allowed) return false;
++        // Foul Potion's check out of combat asks the scene for a merchant whose stock is
++        // closed. Headless, stock and merchant are one screen: a merchant is there or not.
++        if (p is FoulPotion && !CombatManager.Instance.IsInProgress)
++            return ActiveInventory(player.RunState.CurrentRoom) != null;
 +        try { return p.PassesCustomUsabilityCheck; }
 +        catch (Exception) { return false; }
++    }
++
++    // FoulPotion.OnUse starts the Fake Merchant's fight only through its scene node, which
++    // headless has none of; the rest is the event's own FoulPotionThrown, run here for
++    // each player as OnUse does. A build whose OnUse already started it is left alone.
++    private void ThrowFoulPotionAtFakeMerchant(FoulPotion potion)
++    {
++        if (_runState?.CurrentRoom is not EventRoom { LocalMutableEvent: FakeMerchant { StartedFight: false } })
++            return;
++        foreach (var p in _runState.Players)
++        {
++            var fake = (FakeMerchant)RunManager.Instance.EventSynchronizer.GetEventForPlayer(p);
++            var task = RunOnPool(() => fake.FoulPotionThrown(potion));
++            WaitForTask(task, 5000, "Fake Merchant FoulPotionThrown");
++        }
++        _syncCtx.Pump();
 +    }
 +
 +    private static bool PotionDiscardableNow(Player player, PotionModel p) =>
@@ -601,7 +772,7 @@ index fe366f1..00bf1ee 100644
      private Dictionary<string, object?> DoDiscardPotion(Player player, Dictionary<string, object?>? args)
      {
          if (args == null || !args.ContainsKey("potion_index"))
-@@ -3077,6 +2928,7 @@ public class RunSimulator
+@@ -3077,6 +2943,7 @@ public class RunSimulator
          if (idx < 0 || idx >= potionsList.Count) return Error($"Invalid potion index {idx}");
          var potion = potionsList[idx];
          if (potion == null) return Error($"No potion at index {idx}");
@@ -609,7 +780,7 @@ index fe366f1..00bf1ee 100644
  
          MegaCrit.Sts2.Core.Commands.PotionCmd.Discard(potion).GetAwaiter().GetResult();
          _syncCtx.Pump();
-@@ -3332,11 +3184,6 @@ public class RunSimulator
+@@ -3332,11 +3199,6 @@ public class RunSimulator
              return GameOverState(_runState.CurrentRoom?.IsVictoryRoom ?? false);
          }
  
@@ -621,7 +792,7 @@ index fe366f1..00bf1ee 100644
          // Check if there's a pending bundle selection (Scroll Boxes: pick 1 of N packs)
          if (_pendingBundles != null && _pendingBundleTcs != null && !_pendingBundleTcs.Task.IsCompleted)
          {
-@@ -3368,37 +3215,23 @@ public class RunSimulator
+@@ -3368,37 +3230,23 @@ public class RunSimulator
              };
          }
  
@@ -669,7 +840,7 @@ index fe366f1..00bf1ee 100644
              };
          }
  
-@@ -3406,24 +3239,7 @@ public class RunSimulator
+@@ -3406,24 +3254,7 @@ public class RunSimulator
          checkCardSelect:
          if (_cardSelector.HasPending && _cardSelector.PendingOptions != null)
          {
@@ -695,7 +866,7 @@ index fe366f1..00bf1ee 100644
  
              return new Dictionary<string, object?>
              {
-@@ -3458,11 +3274,8 @@ public class RunSimulator
+@@ -3458,11 +3289,8 @@ public class RunSimulator
              };
          }
  
@@ -709,7 +880,26 @@ index fe366f1..00bf1ee 100644
  
          // Check if RunManager reports game over (victory)
          if (RunManager.Instance.IsGameOver)
-@@ -3749,6 +3562,40 @@ public class RunSimulator
+@@ -3511,6 +3339,9 @@ public class RunSimulator
+         // Event room
+         if (room is EventRoom eventRoom)
+         {
++            // The Fake Merchant has no options: its screen is a shop.
++            if (ActiveInventory(eventRoom) is MerchantInventory fakeStock)
++                return ShopState(fakeStock, player);
+             return EventChoiceState(eventRoom);
+         }
+ 
+@@ -3523,7 +3354,7 @@ public class RunSimulator
+         // Merchant/Shop
+         if (room is MerchantRoom merchantRoom)
+         {
+-            return ShopState(merchantRoom, player);
++            return ShopState(merchantRoom.GetLocalInventory(), player);
+         }
+ 
+         // Treasure room
+@@ -3749,6 +3580,40 @@ public class RunSimulator
              ["act"] = _runState.CurrentActIndex + 1,
              ["act_name"] = _loc.Act(_runState.Act?.Id.Entry ?? "OVERGROWTH"),
              ["floor"] = _runState.ActFloor,
@@ -750,7 +940,7 @@ index fe366f1..00bf1ee 100644
          };
      }
  
-@@ -4311,6 +4158,99 @@ public class RunSimulator
+@@ -4311,6 +4176,99 @@ public class RunSimulator
          return cardInfo;
      }
  
@@ -850,7 +1040,7 @@ index fe366f1..00bf1ee 100644
      /// <summary>
      /// The full combat board as a <c>combat_play</c> payload, or null when no
      /// fight is in progress.
-@@ -4635,262 +4575,66 @@ public class RunSimulator
+@@ -4635,262 +4593,66 @@ public class RunSimulator
      private Dictionary<string, object?> DetectPostCombatState(Player player, CombatRoom combatRoom)
      {
          Log($"Post-combat: RoomType={combatRoom.RoomType}, IsPreFinished={combatRoom.IsPreFinished}");
@@ -1149,7 +1339,36 @@ index fe366f1..00bf1ee 100644
      private void ForceToMap()
      {
          // A finished run must NOT navigate away from the current room: the
-@@ -5259,84 +5003,88 @@ public class RunSimulator
+@@ -5186,9 +4948,17 @@ public class RunSimulator
+         };
+     }
+ 
+-    private Dictionary<string, object?> ShopState(MerchantRoom merchantRoom, Player player)
++    // The merchant the player stands at: a shop room's, or the Fake Merchant event's
++    // until its fight starts. Its screen is the shop's, so one shop serves both.
++    private static MerchantInventory? ActiveInventory(AbstractRoom? room) => room switch
++    {
++        MerchantRoom shop => shop.GetLocalInventory(),
++        EventRoom { LocalMutableEvent: FakeMerchant { StartedFight: false } fake } => fake.Inventory,
++        _ => null,
++    };
++
++    private Dictionary<string, object?> ShopState(MerchantInventory? inv, Player player)
+     {
+-        var inv = merchantRoom.GetLocalInventory();
+         if (inv == null) { ForceToMap(); return MapSelectState(); }
+ 
+         var cards = inv.CharacterCardEntries.Concat(inv.ColorlessCardEntries)
+@@ -5244,7 +5014,7 @@ public class RunSimulator
+             return dict;
+         }).ToList();
+ 
+-        var removal = merchantRoom.GetLocalInventory().CardRemovalEntry;
++        var removal = inv.CardRemovalEntry;
+ 
+         return new Dictionary<string, object?>
+         {
+@@ -5259,84 +5029,88 @@ public class RunSimulator
          };
      }
  
@@ -1303,7 +1522,7 @@ index fe366f1..00bf1ee 100644
      }
  
      private Dictionary<string, object?> GameOverState(bool isVictory)
-@@ -5523,9 +5271,11 @@ public class RunSimulator
+@@ -5523,9 +5297,11 @@ public class RunSimulator
      }
  
      /// <summary>True iff the harness is currently holding a player-facing card
@@ -1318,7 +1537,7 @@ index fe366f1..00bf1ee 100644
          _cardSelector.HasPending || _cardSelector.HasPendingReward || _pendingBundles != null;
  
      /// <summary>
-@@ -5560,7 +5310,7 @@ public class RunSimulator
+@@ -5560,7 +5336,7 @@ public class RunSimulator
      private void DrivePurchaseTask()
      {
          DriveStashedTask(ref _pendingPurchaseTask, "shop purchase task");
@@ -1327,7 +1546,7 @@ index fe366f1..00bf1ee 100644
      }
  
      private void DriveStashedTask(ref Task? slot, string what)
-@@ -5576,9 +5326,46 @@ public class RunSimulator
+@@ -5576,9 +5352,46 @@ public class RunSimulator
              return;
          }
          if (task.IsFaulted) { try { task.GetAwaiter().GetResult(); } catch (Exception ex) { LogException($"{what} fault", ex); } }
@@ -1377,7 +1596,7 @@ index fe366f1..00bf1ee 100644
      }
  
      private void WaitUntilOptionTaskSettles(Task task, string reason)
-@@ -5890,28 +5677,13 @@ public class RunSimulator
+@@ -5890,28 +5703,13 @@ public class RunSimulator
                      ["description"] = _loc.Bilingual("potions", p.Id.Entry + ".description"),
                      ["vars"] = pvars.Count > 0 ? pvars : null,
                      ["target_type"] = p.TargetType.ToString(),
@@ -1410,7 +1629,7 @@ index fe366f1..00bf1ee 100644
          };
      }
  
-@@ -6120,7 +5892,7 @@ public class RunSimulator
+@@ -6120,7 +5918,7 @@ public class RunSimulator
          // Not a Godot deref at all: TestMode's auto-taker asserts every offered reward was
          // taken, which is false whenever one legitimately declines (full potion belt).
          // Kills 4 of 60 runs' worth of samples across a rest-site and an event call site.
@@ -1419,7 +1638,7 @@ index fe366f1..00bf1ee 100644
  
          // Exactly the same death-hook wedge on a different monster: SoulNexus derefs
          // NCombatRoom.Instance unguarded from its Died handler, so KILLING one abandons
-@@ -7743,91 +7515,60 @@ public class RunSimulator
+@@ -7743,91 +7541,60 @@ public class RunSimulator
          }
      }
  
@@ -1557,7 +1776,7 @@ index fe366f1..00bf1ee 100644
      private static void PatchKaiserCrabBackground()
      {
          try
-@@ -8292,68 +8033,89 @@ public class RunSimulator
+@@ -8292,68 +8059,89 @@ public class RunSimulator
              tcs?.TrySetResult(Array.Empty<CardModel>());
          }
  

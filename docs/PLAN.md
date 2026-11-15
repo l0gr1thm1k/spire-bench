@@ -56,7 +56,7 @@ until acts 2 and 3 are measured. See [M0.md](M0.md).
 | Rewards | have | The room's own rewards screen: the player takes each reward or leaves it, and opens a chest or not. See [FIDELITY.md](FIDELITY.md). |
 | Map | have | Every `map_select` carries the current act's map: node icons, edges, bosses, position, path walked. |
 | Selections | have | A `card_select` is made one card at a time, so no selection is capped. Cards everywhere keep enchantment, affliction and cost. |
-| Potions outside combat | have | On every screen the game opens the belt, from its own checks. A potion whose check reads the scene (Foul Potion at a merchant) reads as not usable. |
+| Potions outside combat | have | On every screen the game opens the belt, from its own checks. Foul Potion is thrown at a merchant for gold, and at the Fake Merchant (a shop screen) it starts the fight. |
 | Swallowed exceptions | gap | The host reports some game exceptions only on stderr. `HeadlessGame` counts them on every run. |
 | A run per process | limit | A second `start_run` in one process fails, and the game is built on singletons, so a reset between runs isn't realistic. A pool of pre-booted processes hides the startup latency, not its CPU. |
 

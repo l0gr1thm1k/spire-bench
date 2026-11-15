@@ -62,9 +62,19 @@ the room, so leaving changes no later draw.
 **Potions outside combat.** On every screen where the game lets you touch
 the belt (map, event, rest site, shop, rewards, treasure), each potion
 carries `can_use` and `can_discard`. These come from the game's own checks:
-the potion's usage, the belt gate and the potion's own condition. One gap
-remains. A potion whose condition reads the scene (Foul Potion at a
-merchant) has no scene headless, so it reads as not usable there.
+the potion's usage, the belt gate and the potion's own condition. A potion
+is aimed the way the game's own use aims it: at the player only when the
+potion accepts the player as a target.
+
+**Foul Potion and the two merchants.** Out of combat, Foul Potion's own
+condition asks the scene for a merchant whose stock is closed. Headless, the
+stock and the merchant are one screen, so the harness asks only whether a
+merchant is there. At a shop the potion is thrown for 100 gold, by the
+potion's own code. The Fake Merchant event has no options; the game shows it
+as a shop, and so does the harness: its relics can be bought or the player
+can leave. A Foul Potion thrown there starts the event's fight through the
+event's own `FoulPotionThrown`, which the game reaches only through its scene.
+The fight's rewards are the game's: the Merchant's Rug and the stocked relics.
 
 **Events already had a way out.** An STS2 event's Leave is one of its own
 options, and the harness lists every option. No change was needed. A test
