@@ -6,6 +6,7 @@ constants both sides share, so neither has to spell them out by hand.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ SCHEMA_VERSION = 0  # the observation format; not frozen until M4
 CHARACTERS = {"ironclad": "Ironclad", "silent": "Silent", "defect": "Defect",
               "regent": "Regent", "necrobinder": "Necrobinder"}
 
-PRACTICE_KEY = "practice"  # the only key in v0: the harness's own seeded dice
+PRACTICE_KEY = "practice"  # the only key in v0; no game is scored until the harness takes keys (M3 slice 2)
 MAX_ASCENSION = 10
 MAX_MESSAGE_BYTES = 2**22  # both ends set this; a bigger observation would drop the connection
 
@@ -34,6 +35,11 @@ def decode(text: str | bytes) -> Message:
     if not isinstance(msg, dict) or not isinstance(msg.get("type"), str):
         raise ValueError("a message is a JSON object with a string 'type'")
     return msg
+
+
+def commitment(data: bytes) -> str:
+    """SHA-256 of a key or secret: published first, so the revealed value can be checked against it."""
+    return hashlib.sha256(data).hexdigest()
 
 
 def load_schema() -> dict[str, Any]:

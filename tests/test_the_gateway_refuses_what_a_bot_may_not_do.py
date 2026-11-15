@@ -11,9 +11,12 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from conftest import key_of
 from websockets.sync.client import connect
 
+from spirebench.gateway.replay_core import view_digest
 from spirebench.gateway.store import read_transcript
+from spirebench.protocol import commitment
 from spirebench.worker.headless import HarnessError
 
 HELLO = {"type": "hello", "token": "dev", "client_version": "test", "protocol_versions": [0]}
@@ -59,7 +62,9 @@ def _session(url):
 
 
 def _recv(ws):
-    return json.loads(ws.recv(timeout=10))
+    """The next message, past the ``episode_start`` each game opens with."""
+    msg = json.loads(ws.recv(timeout=10))
+    return _recv(ws) if msg["type"] == "episode_start" else msg
 
 
 def _act(ws, decision, action_id, seq=None):
@@ -117,7 +122,21 @@ def test_a_finished_game_is_scored_and_its_transcript_kept(gateway):
     path, outcome = store.db.execute("select transcript, outcome from episodes").fetchone()
     lines = read_transcript(Path(path))
     assert outcome == "win" and [x["kind"] for x in lines] == ["header", "move", "move", "move", "end"]
-    assert lines[0]["episode_key"] == msg["reveal"]["episode_key"]
+    key = bytes.fromhex(msg["reveal"]["episode_key"])
+    assert key == key_of("t", 1)
+    assert lines[0]["commit"] == commitment(key) and "episode_key" not in lines[0]
+    won = ScriptedGame()
+    won.moves = 3
+    assert lines[-1]["digest"] == view_digest(won._view())
+
+
+def test_each_game_opens_with_the_commitment_to_its_key(gateway):
+    url, _ = gateway(ScriptedGame)
+    with _session(url) as ws:
+        start = json.loads(ws.recv(timeout=10))
+        assert start == {"type": "episode_start", "episode": start["episode"], "number": 1,
+                         "commit": commitment(key_of("t", 1))}
+        assert json.loads(ws.recv(timeout=10))["type"] == "decisions"
 
 
 def test_a_bot_that_leaves_mid_game_loses_it(gateway):

@@ -1,6 +1,7 @@
 """Play games against a gateway with the random bot.
 
-  uv run python -m spirebench.gateway &                    # in one terminal
+  uv run python -m spirebench.gateway.keys new-secret data/dev.secret   # once
+  uv run python -m spirebench.gateway --season dev --season-secret data/dev.secret &   # in one terminal
   uv run python tools/random_bot.py --episodes 3          # in another
 """
 

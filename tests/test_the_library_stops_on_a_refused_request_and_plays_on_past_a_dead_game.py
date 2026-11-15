@@ -28,23 +28,23 @@ def test_an_agent_version_another_owner_holds_raises_instead_of_waiting_forever(
 
 
 class OneCrashingGame(ScriptedGame):
-    """The first game booted dies on its first move; the others play normally."""
+    """Every worker of the first game started dies on its first move, so its restore dies too."""
 
-    booted = 0
+    doomed: str | None = None
 
-    def __init__(self):
-        super().__init__()
-        self.crashes = OneCrashingGame.booted == 0
-        OneCrashingGame.booted += 1
+    def start_run(self, character, ascension, seed):
+        OneCrashingGame.doomed = OneCrashingGame.doomed or seed
+        self.seed = seed
+        return super().start_run(character, ascension, seed)
 
     def act(self, verb, args):
-        if self.crashes:
+        if self.seed == OneCrashingGame.doomed:
             raise HarnessError("harness exited (code 134)")
         return super().act(verb, args)
 
 
 def test_a_game_whose_harness_dies_is_void_and_the_other_games_play_on(gateway):
-    OneCrashingGame.booted = 0
+    OneCrashingGame.doomed = None
     url, _ = gateway(OneCrashingGame)
     ends = _run(url, episodes=3, in_flight=2)  # the random bot also hits the move the game refuses
     assert sorted(e["outcome"] for e in ends) == ["void", "win", "win"]

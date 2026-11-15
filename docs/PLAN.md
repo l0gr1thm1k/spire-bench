@@ -75,7 +75,8 @@ without breaking their code, as long as each contract holds.
 
 - **A. Worker ↔ gateway.** JSON lines on the worker's stdin and stdout, the
   harness's native interface. A pipe means the worker needs no network at all.
-  The gateway sends only `start {episode_key, character, ascension}`,
+  The gateway sends only `start {seed, character, ascension}` (the seed comes
+  from the episode key; M3 slice 2 passes the key itself),
   `action {...}` and `close`.
 - **B. Gateway ↔ library.** A versioned JSON protocol over WebSocket, with
   compression on. A JSON Schema file in `schema/` is the source of truth. This
@@ -126,12 +127,13 @@ client.run(
 | Message | Direction | Fields |
 |---|---|---|
 | `hello` | client → server | `token`, `client_version`, `schema_versions` |
-| `welcome` | server → client | `build_id`, `schema_version`, `limits` (decision deadline, max in flight, daily cap) |
+| `welcome` | server → client | `build_id`, `schema_version`, `season`, `season_commitment` (SHA-256 of the season secret), `limits` (decision deadline, max in flight, daily cap) |
 | `start` | client → server | `agent_version`, `character`, `ascension`, `key` (practice or scored), `count` |
+| `episode_start` | server → client | `episode`, `number`, `commit` (SHA-256 of the episode key), sent before the game boots |
 | `decisions` | server → client | list of `{episode, seq, decision_type, observation, legal_actions, deadline_ms}` |
 | `actions` | client → server | list of `{episode, seq, action_id}` |
 | `errors` | server → client | list of `{episode, seq, code}`, where `code` is one of `illegal_action`, `bad_request`, `not_available`, `rejected`, `internal` |
-| `episode_end` | server → client | `episode`, `number`, `outcome`, `floor`, `act`, and for the owner `reveal {episode_key, transcript}` |
+| `episode_end` | server → client | `episode`, `number`, `outcome`, `floor`, `act`, `fault` on a void game, and for the owner `reveal {episode_key, transcript}`; the library checks the key against `commit` |
 
 `decisions`, `actions` and `errors` all carry lists, so batching is built into
 the protocol. `number` is assigned by the server when an episode starts, and
