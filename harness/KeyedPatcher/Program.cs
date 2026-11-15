@@ -7,6 +7,8 @@
 //   every call to another source of randomness first asks KeyedGuard.Unkeyed,
 //   RunSimulator.StartRun takes the key where it took a seed string.
 // --trace-streams (a separate build, for tools/fuzz_keyed.py) also logs each stream opened.
+// --fuzz-immortal (tools/fuzz_keyed.py --deep only) keeps the player at 1 HP or more; with --seeded it
+// patches nothing else, so the leak check has a seeded game that lives as long.
 // Each rewrite must apply exactly as counted, or nothing is written.
 using System;
 using System.Collections.Generic;
@@ -22,13 +24,14 @@ static class Program
     const string Rng = "MegaCrit.Sts2.Core.Random.Rng";
     const string RunSimulator = "Sts2Headless.RunSimulator";
     const string SerializableRng = "MegaCrit.Sts2.Core.Saves.SerializableRng";
+    const string Creature = "MegaCrit.Sts2.Core.Entities.Creatures.Creature";
 
     static int Main(string[] argv)
     {
         var opts = Options.Parse(argv);
         if (opts is null)
         {
-            Console.Error.WriteLine("usage: KeyedPatcher --bin DIR --lib DIR --keyedrng DLL --localization DIR --out DIR [--plant-unkeyed-draw] [--trace-streams]");
+            Console.Error.WriteLine("usage: KeyedPatcher --bin DIR --lib DIR --keyedrng DLL --localization DIR --out DIR [--plant-unkeyed-draw] [--trace-streams] [--fuzz-immortal [--seeded]]");
             return 2;
         }
         var outLib = Path.Combine(opts.Out, "lib");
@@ -45,9 +48,17 @@ static class Program
         var keyed = ModuleDefinition.ReadModule(Path.Combine(outLib, "KeyedRng.dll"));
 
         var game = Path.Combine(outLib, "sts2.dll");
+        if (opts.Seeded)
+        {
+            Rewrite(game, resolver, module => FuzzImmortal(module, new Api(module, keyed)));
+            Console.WriteLine($"seeded fuzz harness written to {opts.Out}");
+            return 0;
+        }
         Rewrite(game, resolver, module =>
         {
             var api = new Api(module, keyed);
+            if (opts.FuzzImmortal)
+                FuzzImmortal(module, api);
             var stream = KeyMegaRandom(module, api);
             KeyChaotic(module, api, stream);
             if (opts.TraceStreams)
@@ -67,23 +78,27 @@ static class Program
         return 0;
     }
 
-    sealed record Options(string Bin, string Lib, string KeyedRng, string Localization, string Out, bool PlantUnkeyedDraw, bool TraceStreams)
+    sealed record Options(string Bin, string Lib, string KeyedRng, string Localization, string Out, bool PlantUnkeyedDraw, bool TraceStreams,
+                          bool FuzzImmortal, bool Seeded)
     {
         public static Options? Parse(string[] argv)
         {
             var named = new Dictionary<string, string>();
-            bool plant = false, trace = false;
+            bool plant = false, trace = false, immortal = false, seeded = false;
             for (int i = 0; i < argv.Length; i++)
             {
                 if (argv[i] == "--plant-unkeyed-draw") plant = true;
                 else if (argv[i] == "--trace-streams") trace = true;
+                else if (argv[i] == "--fuzz-immortal") immortal = true;
+                else if (argv[i] == "--seeded") seeded = true;
                 else if (argv[i].StartsWith("--") && i + 1 < argv.Length) named[argv[i]] = argv[++i];
                 else return null;
             }
             string[] need = { "--bin", "--lib", "--keyedrng", "--localization", "--out" };
-            if (need.Any(k => !named.ContainsKey(k)))
+            if (need.Any(k => !named.ContainsKey(k)) || (seeded && (!immortal || plant || trace)))
                 return null;
-            return new Options(named["--bin"], named["--lib"], named["--keyedrng"], named["--localization"], named["--out"], plant, trace);
+            return new Options(named["--bin"], named["--lib"], named["--keyedrng"], named["--localization"], named["--out"], plant, trace,
+                               immortal, seeded);
         }
     }
 
@@ -107,9 +122,12 @@ static class Program
             Unkeyed = Get("SpireBench.Keyed.KeyedGuard", "Unkeyed");
             Command = Get("SpireBench.Keyed.KeyedGuard", "Command");
             TraceOpen = Get("SpireBench.Keyed.KeyedStreams", "TraceOpen");
+            KeepPlayerAlive = Get("SpireBench.Keyed.FuzzOnly", "KeepPlayerAlive");
+            KeepPlayerHp = Get("SpireBench.Keyed.FuzzOnly", "KeepPlayerHp");
+            RunEnding = Get("SpireBench.Keyed.FuzzOnly", "RunEnding");
         }
 
-        public MethodReference TraceOpen, Open, Keyed, Next, RefuseBytes, RefuseRestore, Begin, Unkeyed, Command, KeyActive, CurrentChaotic, OpenChaotic, SetChaotic;
+        public MethodReference KeepPlayerAlive, KeepPlayerHp, RunEnding, TraceOpen, Open, Keyed, Next, RefuseBytes, RefuseRestore, Begin, Unkeyed, Command, KeyActive, CurrentChaotic, OpenChaotic, SetChaotic;
     }
 
     static FieldDefinition KeyMegaRandom(ModuleDefinition module, Api api)
@@ -227,6 +245,34 @@ static class Program
         var reinit = SeededReinitialise(module.GetType(MegaRandom));
         Prepend(reinit, il => new[] { il.Create(OpCodes.Ldarg_1), il.Create(OpCodes.Call, api.TraceOpen) });
         Console.WriteLine("  TRACING every stream opened (trace build, never the gateway's)");
+    }
+
+    /// <summary>The fuzz-deep build: Creature.LoseHpInternal and set_CurrentHp go through FuzzOnly, which keeps the player at 1 HP or more.</summary>
+    static void FuzzImmortal(ModuleDefinition module, Api api)
+    {
+        var creature = module.GetType(Creature) ?? throw new InvalidOperationException($"{Creature} not found");
+        var currentHp = Only(creature, "get_CurrentHp");
+        var isPlayer = Only(creature, "get_IsPlayer");
+        var lose = Only(creature, "LoseHpInternal");
+        var set = Only(creature, "set_CurrentHp");
+        if (lose.Parameters.Count != 2 || lose.Parameters[0].ParameterType.FullName != "System.Decimal"
+            || set.Parameters.Count != 1 || set.Parameters[0].ParameterType.MetadataType != MetadataType.Int32)
+            throw new InvalidOperationException($"unreviewed {lose.FullName} or {set.FullName}; this game build needs a new review");
+        foreach (var (method, keep) in new[] { (lose, api.KeepPlayerAlive), (set, api.KeepPlayerHp) })
+            Prepend(method, il => new[]
+            {
+                il.Create(OpCodes.Ldarg_1),
+                il.Create(OpCodes.Ldarg_0), il.Create(OpCodes.Call, currentHp),
+                il.Create(OpCodes.Ldarg_0), il.Create(OpCodes.Call, isPlayer),
+                il.Create(OpCodes.Call, keep), il.Create(OpCodes.Starg, method.Parameters[0]),
+            });
+        var runs = module.GetType("MegaCrit.Sts2.Core.Runs.RunManager") ?? throw new InvalidOperationException("RunManager not found");
+        var killAll = Only(runs, "GuaranteeKillAllPlayers");
+        if (killAll.Parameters.Count != 0)
+            throw new InvalidOperationException($"unreviewed {killAll.FullName}; this game build needs a new review");
+        Prepend(killAll, il => new[] { il.Create(OpCodes.Call, api.RunEnding) });
+        Console.WriteLine("  IMMORTAL player: Creature.LoseHpInternal and set_CurrentHp stop at 1 HP, then enemies die on a hit (the player dies after FuzzOnly.SavesPerKill saves without a kill);"
+                          + " RunManager.GuaranteeKillAllPlayers lifts it so a won run ends (fuzz-deep build, never the gateway's)");
     }
 
     static void TakeKeyAtStartRun(ModuleDefinition module, Api api)

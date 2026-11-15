@@ -60,17 +60,27 @@ def harness_dll(game_version: str = DEFAULT_GAME_VERSION, config: str = "Release
     return PYCLI / "src" / "Sts2Headless" / "bin" / game_version / config / "net9.0" / "Sts2Headless.dll"
 
 
-def keyed_dir(game_version: str = DEFAULT_GAME_VERSION, plant: bool = False, trace: bool = False) -> Path:
+def keyed_dir(game_version: str = DEFAULT_GAME_VERSION, plant: bool = False, trace: bool = False,
+              deep: bool = False) -> Path:
     """The keyed harness; ``plant`` is the test build that makes one unkeyed draw, to show it is refused,
-    and ``trace`` the fuzzer's build, which logs every stream it opens (never the gateway's)."""
-    if plant and trace:
-        raise ValueError("the plant and trace builds are separate")
-    return REPO / "build" / ("keyed-plant" if plant else "keyed-trace" if trace else "keyed") / game_version
+    ``trace`` the fuzzer's build, which logs every stream it opens, and ``deep`` the traced fuzz build whose
+    player never drops below 1 HP. None of them is ever the gateway's."""
+    if plant + trace + deep > 1:
+        raise ValueError("the plant, trace and deep builds are separate")
+    name = "keyed-plant" if plant else "keyed-trace" if trace else "fuzz-deep" if deep else "keyed"
+    return REPO / "build" / name / game_version
+
+
+def seeded_deep_dll(game_version: str = DEFAULT_GAME_VERSION) -> Path:
+    """The upstream harness with only the fuzz-deep build's 1 HP floor, for the deep fuzz's leak check."""
+    return REPO / "build" / "fuzz-deep-seeded" / game_version / "Sts2Headless.dll"
 
 
 def worker_dll(game_version: str = DEFAULT_GAME_VERSION, keyed: bool = True, plant: bool = False,
-               trace: bool = False) -> Path:
-    return keyed_dir(game_version, plant, trace) / "Sts2Headless.dll" if keyed else harness_dll(game_version)
+               trace: bool = False, deep: bool = False) -> Path:
+    if keyed:
+        return keyed_dir(game_version, plant, trace, deep) / "Sts2Headless.dll"
+    return seeded_deep_dll(game_version) if deep else harness_dll(game_version)
 
 
 def _sha256(path: Path) -> str | None:
@@ -158,13 +168,15 @@ class HeadlessGame:
 
     ``keyed`` (the default) runs the keyed build, which takes an episode key;
     otherwise the upstream build, which takes a seed string. ``plant`` runs the
-    keyed test build that makes one unkeyed draw; ``trace`` the fuzzer's build.
+    keyed test build that makes one unkeyed draw; ``trace`` the fuzzer's build;
+    ``deep`` the fuzz builds whose player never drops below 1 HP.
     """
 
     def __init__(self, game_version: str = DEFAULT_GAME_VERSION, keyed: bool = True, plant: bool = False,
-                 stderr_path: Path | None = None, timeout_s: float = 60.0, trace: bool = False) -> None:
+                 stderr_path: Path | None = None, timeout_s: float = 60.0, trace: bool = False,
+                 deep: bool = False) -> None:
         self.timeout_s, self.timed_out, self.keyed = timeout_s, False, keyed
-        dll = worker_dll(game_version, keyed, plant, trace)
+        dll = worker_dll(game_version, keyed, plant, trace, deep)
         if not dll.exists():
             raise FileNotFoundError(f"harness not built: {dll}")
         env = dict(os.environ)

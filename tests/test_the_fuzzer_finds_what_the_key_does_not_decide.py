@@ -44,3 +44,12 @@ def test_one_key_for_every_game_is_reported_as_a_leak():
 def test_a_one_bit_key_change_changes_every_stream():
     failures, _ = fuzz.check_streams(GAME_VERSION, KEYS[:3], 60)
     assert failures == []
+
+
+@pytest.mark.skipif(not (keyed_dir(GAME_VERSION, deep=True) / "Sts2Headless.dll").exists(),
+                    reason=f"needs the fuzz-deep build: harness/build_keyed.sh {GAME_VERSION} --fuzz-deep")
+def test_the_deep_fuzz_plays_to_the_end_of_the_run_and_passes():
+    assert fuzz.check_reach(GAME_VERSION, KEYS[:2], 3000) == []
+    assert fuzz.check_determinism(GAME_VERSION, KEYS[:1], 3000, deep=True) == []
+    failures, _ = fuzz.check_streams(GAME_VERSION, KEYS[:1], 3000, deep=True)
+    assert failures == []
